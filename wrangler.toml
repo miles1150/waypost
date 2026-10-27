@@ -6,7 +6,12 @@ compatibility_date = "2026-07-17"
 workers_dev = true
 
 [build]
-command = "worker-build --release --no-default-features --features cloudflare"
+command = "worker-build --release --no-default-features --features cloudflare && python3 scripts/prepare_dashboard_assets.py"
+
+[assets]
+directory = "./build/dashboard-assets"
+not_found_handling = "none"
+html_handling = "auto-trailing-slash"
 
 [vars]
 PUBLIC_ORIGIN = "http://127.0.0.1:8791"

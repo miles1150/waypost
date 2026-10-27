@@ -15,7 +15,7 @@ Cloudflare Containers can run the native binary, but they require the Workers Pa
 - Dashboard, admin session, CSRF, invitations, and access requests
 - HTTP API and stateless MCP at `POST /mcp` (initialize, tools/list, tools/call)
 - Mailbox, receipts, memory, and encrypted blobs inside the Worker limits below
-- `GET /health`, and `GET /ready` with the admin bearer (checks the nine migrations and an R2 read)
+- `GET /health`, and `GET /ready` with the admin bearer (checks the ten migrations and an R2 read)
 - Per-IP rate limits from the bindings in the Wrangler config
 
 Verified locally with Wrangler 4.111.0, Workerd, local D1/R2, the official MCP SDK client, and `scripts/verify_deployment.py`. This repo does not deploy to a live account from CI.
@@ -52,7 +52,7 @@ Encrypted requests and larger mailbox writes can pass 10 ms of CPU. If the dashb
 
 1. A D1 database. The production template expects the name `waypost-production`.
 2. A private R2 bucket, `waypost-production-objects`. Leave `r2.dev` and any public bucket domain off.
-3. The Worker `waypost-production`, created by `wrangler deploy`. `workers.dev` is enabled in the template.
+3. The Worker `waypost-production`, created by `wrangler deploy`. The production template attaches the custom domain `waypost.miles1150.top` and sets `workers_dev = false` and `preview_urls = false`.
 4. Two rate-limit bindings, `ADMIN_RATE_LIMITER` (10/60s) and `API_RATE_LIMITER` (300/60s). Wrangler creates them from `namespace_id`. Pick IDs that no other Worker in the account uses. `1001` and `1002` are only examples.
 5. Secrets, in a mode-`0600` file passed to `wrangler deploy --secrets-file`. Wrangler accepts a JSON object of strings, or a dotenv file. The commands below write JSON to `.env.production` (matched by `.gitignore`).
    - `WAYPOST_ADMIN_SECRET` — at least 32 characters
@@ -65,7 +65,11 @@ Encryption keyring shape (placeholder only):
 {"active":"v1","keys":{"v1":"<64 hex chars from 32 random bytes>"}}
 ```
 
-`PUBLIC_ORIGIN` must be the exact `https` origin (`scheme://host`, no path, no trailing slash) of the URL clients use. Read the account's `workers.dev` subdomain in the dashboard before the first deploy. A wrong origin makes browser calls fail the Origin check.
+`PUBLIC_ORIGIN` must be the exact `https` origin (`scheme://host`, no path, no trailing slash) of the URL clients use. The production template sets it to `https://waypost.miles1150.top`. A wrong origin makes browser calls fail the Origin check.
+
+The zone `miles1150.top` has to be on the account before that deploy. The template registers the custom domain and turns `workers.dev` off in the same step. Confirm `https://waypost.miles1150.top/health` after deploy. If the hostname did not attach, turn `workers_dev` back on until it does.
+
+Dashboard HTML, scripts, CSS, and locale files are Workers Static Assets, generated into `build/dashboard-assets` by `scripts/prepare_dashboard_assets.py` at the end of the Wrangler build command. Paths stay `/`, `/dashboard`, `/dashboard/`, and fingerprinted `/dashboard/*` files (for example `/dashboard/app.<hash>.js` and `/dashboard/locales/en.<hash>.json`). `/dashboard` redirects to `/dashboard/`. There is no new path prefix. A WAF allowlist of `/`, `/health`, `/ready`, `/mcp`, `/dashboard`, `/dashboard/*`, `/admin/*`, and `/v0/*` still covers every asset. Fingerprinted files send `cache-control: public, max-age=31536000, immutable`. HTML revalidates. Auth and API responses are produced by the Worker and stay `no-store`. Production logs use head sampling rate 1. Each error log is one JSON object with `error_code`, `route`, and `request_id` only. Traces stay at 0.1.
 
 `compatibility_date` stays `2026-07-17`, the date this adapter was built and tested against.
 
@@ -122,15 +126,31 @@ npx wrangler@4.111.0 deploy --dry-run --config wrangler.production.toml
 npx wrangler@4.111.0 deploy --config wrangler.production.toml --secrets-file .env.production
 ```
 
-Migrations are `migrations/0001_identity_mailbox.sql` through `migrations/0009_onboarding.sql`. Apply them to the production database before serving traffic. Do not point the production config at a development database.
+Migrations are `migrations/0001_identity_mailbox.sql` through `migrations/0010_query_indexes.sql`. Apply them to the production database before serving traffic. Do not point the production config at a development database. `/ready` reports `schema_revision` 10 only after `0010_query_indexes.sql` is applied.
 
 After deploy:
 
 ```bash
-curl --fail --silent "https://waypost-production.<subdomain>.workers.dev/health"
+curl --fail --silent "https://waypost.miles1150.top/health"
 python3 scripts/verify_deployment.py \
-  --url "https://waypost-production.<subdomain>.workers.dev" \
+  --url "https://waypost.miles1150.top" \
   --admin-secret-file /path/to/admin-secret
 ```
+
+## Update the live Worker
+
+Copy the template's custom-domain route, `workers_dev = false`, `preview_urls = false`, `PUBLIC_ORIGIN`, `[observability.logs]`, `[assets]`, and build command into the gitignored `wrangler.production.toml`. Keep that file's real `account_id`, `database_id`, bucket name, and rate-limit namespace ids.
+
+Apply migration `0010_query_indexes.sql` before the Worker that expects ten migrations, then redeploy. Omit `--secrets-file` unless the secrets are rotating.
+
+```bash
+npx wrangler@4.111.0 d1 migrations apply waypost-production --remote --config wrangler.production.toml
+npx wrangler@4.111.0 deploy --dry-run --config wrangler.production.toml
+npx wrangler@4.111.0 deploy --config wrangler.production.toml
+curl --fail --silent "https://waypost.miles1150.top/health"
+curl --fail --silent --header "Authorization: Bearer <admin secret>" "https://waypost.miles1150.top/ready"
+```
+
+`schema_revision` must be 10. Then open `https://waypost.miles1150.top/` and `https://waypost.miles1150.top/dashboard/`.
 
 Store the admin secret and the keyring outside the data backup. Losing the keyring makes existing ciphertext unreadable. Redeploying the Worker keeps D1 and R2 data.

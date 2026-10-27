@@ -35,4 +35,28 @@ pub const MIGRATIONS: &[(&str, &str)] = &[
         "0009_onboarding.sql",
         include_str!("../../migrations/0009_onboarding.sql"),
     ),
+    (
+        "0010_query_indexes.sql",
+        include_str!("../../migrations/0010_query_indexes.sql"),
+    ),
 ];
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn query_indexes_match_lookup_columns() {
+        let sql = super::MIGRATIONS
+            .iter()
+            .find(|(name, _)| *name == "0010_query_indexes.sql")
+            .expect("0010 registered")
+            .1;
+        for statement in [
+            "CREATE INDEX IF NOT EXISTS messages_body_ref ON messages(body_ref);",
+            "CREATE INDEX IF NOT EXISTS submissions_body_ref ON submissions(body_ref);",
+            "CREATE INDEX IF NOT EXISTS message_attachments_blob ON message_attachments(space_id, blob_id);",
+            "CREATE INDEX IF NOT EXISTS memory_revisions_manifest ON memory_revisions(space_id, manifest_blob_id);",
+        ] {
+            assert!(sql.contains(statement), "{statement}");
+        }
+    }
+}

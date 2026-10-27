@@ -327,6 +327,57 @@ fn error_response(error: Error) -> worker::Result<worker::Response> {
     worker::Response::from_json(&json!({"ok":false,"error":error.value()}))
         .map(|r| r.with_status(error.status()))
 }
+
+/// Error log line: error code, route, and request id. Nothing else.
+fn log_structured(route: &str, code: &str, request_id: Option<&str>) {
+    let error_code = if code.len() <= 64
+        && code
+            .bytes()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_')
+    {
+        code
+    } else {
+        "INTERNAL_ERROR"
+    };
+    let route = if route.len() <= 160
+        && route.bytes().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, b' ' | b'/' | b':' | b'_' | b'-' | b'.')
+        }) {
+        route
+    } else {
+        "UNKNOWN /unknown"
+    };
+    let request_id = request_id.filter(|id| crate::domain::check_request_id(id).is_ok());
+    let line = serde_json::to_string(&json!({
+        "error_code": error_code,
+        "route": route,
+        "request_id": request_id,
+    }))
+    .unwrap_or_else(|_| {
+        r#"{"error_code":"INTERNAL_ERROR","route":"UNKNOWN /unknown","request_id":null}"#.into()
+    });
+    worker::console_error!("{}", line);
+}
+
+fn log_and_error(route: &str, error: Error) -> worker::Result<worker::Response> {
+    log_structured(route, error.code, None);
+    error_response(error)
+}
+
+fn log_json_error(route: &str, body: &[u8]) {
+    let parsed = serde_json::from_slice::<Value>(body).ok();
+    let code = parsed
+        .as_ref()
+        .and_then(|value| value.get("error"))
+        .and_then(|error| error.get("code"))
+        .and_then(Value::as_str)
+        .unwrap_or("INTERNAL_ERROR");
+    let request_id = parsed
+        .as_ref()
+        .and_then(|value| value.get("request_id"))
+        .and_then(Value::as_str);
+    log_structured(route, code, request_id);
+}
 fn convert(response: Response) -> worker::Result<worker::Response> {
     let mut r = worker::Response::from_bytes(response.body)?.with_status(response.status);
     for (k, v) in response.headers {
@@ -340,10 +391,17 @@ pub async fn fetch(
     env: Env,
     _ctx: Context,
 ) -> worker::Result<worker::Response> {
-    let https = raw.url()?.scheme() == "https";
+    let https = match raw.url() {
+        Ok(url) => url.scheme() == "https",
+        Err(_) => {
+            log_structured("UNKNOWN /unknown", "INTERNAL_ERROR", None);
+            return error_response(Error::internal("worker request boundary"));
+        }
+    };
+    let route_name = crate::http::route_label(raw.method().as_ref(), &raw.path());
     let mut response = match handle_fetch(raw, env).await {
         Ok(response) => response,
-        Err(_) => error_response(Error::internal("worker request boundary"))?,
+        Err(_) => log_and_error(&route_name, Error::internal("worker request boundary"))?,
     };
     for (name, value) in [
         ("cache-control", "no-store"),
@@ -361,6 +419,7 @@ pub async fn fetch(
 }
 
 async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<worker::Response> {
+    let route_name = crate::http::route_label(raw.method().as_ref(), &raw.path());
     let production = env
         .var("DEPLOYMENT_ENV")
         .is_ok_and(|value| value.to_string() == "production");
@@ -375,20 +434,20 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
         || origin.origin().ascii_serialization() != config.public_origin
         || (production && origin.scheme() != "https")
     {
-        return error_response(Error::internal("worker configuration"));
+        return log_and_error(&route_name, Error::internal("worker configuration"));
     }
     if raw
         .headers()
         .get("origin")?
         .is_some_and(|value| value != config.public_origin)
     {
-        return error_response(Error::forbidden());
+        return log_and_error(&route_name, Error::forbidden());
     }
     // Production must not silently omit abuse controls when a binding is missing.
     let admin_limiter = env.rate_limiter("ADMIN_RATE_LIMITER");
     let api_limiter = env.rate_limiter("API_RATE_LIMITER");
     if production && (admin_limiter.is_err() || api_limiter.is_err()) {
-        return error_response(Error::internal("worker configuration"));
+        return log_and_error(&route_name, Error::internal("worker configuration"));
     }
     let path = raw.path();
     let route = crate::http::classify(raw.method().as_ref(), &path);
@@ -413,10 +472,10 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
             .limit(format!("ip:{}", hex::encode(Sha256::digest(ip.as_bytes()))))
             .await?;
         if !outcome.success {
-            let mut response = error_response(Error::new(
-                "RATE_LIMITED",
-                "Request rate limit exceeded; retry later.",
-            ))?;
+            let mut response = log_and_error(
+                &route_name,
+                Error::new("RATE_LIMITED", "Request rate limit exceeded; retry later."),
+            )?;
             response.headers_mut().set("retry-after", "60")?;
             return Ok(response);
         }
@@ -444,7 +503,12 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
     let app = if let Ok(secret) = env.secret("WAYPOST_CURSOR_SECRET") {
         match app.with_cursor_secret(&secret.to_string()) {
             Ok(app) => app,
-            Err(_) => return error_response(Error::internal("worker cursor key configuration")),
+            Err(_) => {
+                return log_and_error(
+                    &route_name,
+                    Error::internal("worker cursor key configuration"),
+                );
+            }
         }
     } else {
         app
@@ -455,10 +519,18 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
             .is_ok_and(|v| v.to_string() == "1");
         match app.with_encryption_keys(&keys.to_string(), legacy) {
             Ok(app) => app,
-            Err(_) => return error_response(Error::internal("worker encryption configuration")),
+            Err(_) => {
+                return log_and_error(
+                    &route_name,
+                    Error::internal("worker encryption configuration"),
+                );
+            }
         }
     } else if production {
-        return error_response(Error::internal("production encryption keyring missing"));
+        return log_and_error(
+            &route_name,
+            Error::internal("production encryption keyring missing"),
+        );
     } else {
         app
     };
@@ -482,7 +554,7 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
         }.await;
         return match readiness {
             Ok(data) => convert(Response::json(200, json!({"ok":true,"data":data}))),
-            Err(error) => error_response(error),
+            Err(error) => log_and_error(&route_name, error),
         };
     }
     if let crate::http::Route::UploadContent(id) = route
@@ -490,7 +562,7 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
     {
         return match app.streaming_upload(&request, &mut raw, id).await {
             Ok(data) => convert(Response::json(200, json!({"ok":true,"data":data}))),
-            Err(e) => error_response(e),
+            Err(e) => log_and_error(&route_name, e),
         };
     }
     if let crate::http::Route::BlobContent(id) = route
@@ -498,7 +570,7 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
     {
         return match app.streaming_download(&request, id).await {
             Ok(response) => Ok(response),
-            Err(e) => error_response(e),
+            Err(e) => log_and_error(&route_name, e),
         };
     }
     let max_body = if matches!(route, crate::http::Route::UploadContent(_)) {
@@ -511,13 +583,17 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
             if request.body.len() + chunk.len() > max_body {
-                return error_response(Error::new(
-                    "RESOURCE_LIMIT",
-                    "Request exceeds Worker deployment limit.",
-                ));
+                return log_and_error(
+                    &route_name,
+                    Error::new("RESOURCE_LIMIT", "Request exceeds Worker deployment limit."),
+                );
             }
             request.body.extend(chunk);
         }
     }
-    convert(app.handle(request).await)
+    let response = app.handle(request).await;
+    if response.status >= 400 {
+        log_json_error(&route_name, &response.body);
+    }
+    convert(response)
 }

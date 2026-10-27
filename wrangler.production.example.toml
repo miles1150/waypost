@@ -1,23 +1,41 @@
 # Copy to wrangler.production.toml and configure your own account/resources.
+# Live production hostname: https://waypost.miles1150.top
 name = "waypost-production"
 account_id = "replace-with-your-account-id"
 main = "build/index.js"
 compatibility_date = "2026-07-17"
-workers_dev = true
+workers_dev = false
 preview_urls = false
 
 [build]
-command = "worker-build --release --no-default-features --features cloudflare"
+command = "worker-build --release --no-default-features --features cloudflare && python3 scripts/prepare_dashboard_assets.py"
+
+# Asset-first. Misses fall through to the Worker (not_found_handling = "none").
+# Dashboard files stay on / and /dashboard/*, so the existing WAF path allowlist
+# covers them. Do not set run_worker_first: that would count every asset as a
+# Worker request.
+[assets]
+directory = "./build/dashboard-assets"
+not_found_handling = "none"
+html_handling = "auto-trailing-slash"
 
 [vars]
 DEPLOYMENT_ENV = "production"
-PUBLIC_ORIGIN = "https://waypost-production.your-subdomain.workers.dev"
+PUBLIC_ORIGIN = "https://waypost.miles1150.top"
 
-# Logs stay at 10% so invocation volume stays bounded.
-# Traces are separate from logs; `observability.enabled` does not turn them on.
+[[routes]]
+pattern = "waypost.miles1150.top"
+custom_domain = true
+
+# Logs are sampled at 1. Traces stay lower; they are billed separately from logs.
+# `observability.enabled` does not turn traces on.
 [observability]
 enabled = true
-head_sampling_rate = 0.1
+head_sampling_rate = 1.0
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1.0
 
 [observability.traces]
 enabled = true
