@@ -4,6 +4,9 @@ use crate::{
     json::{fields, required},
 };
 impl<D: Database, O: ObjectStore> App<D, O> {
+    /// Native and tests still embed the dashboard. The wasm Worker does not:
+    /// production serves these files from Workers Static Assets.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn dashboard_asset(&self, request: &Request) -> Option<Response> {
         if request.method != "GET" {
             return None;
@@ -40,6 +43,10 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             _ => return None,
         };
         Some(Response{status:200,headers:BTreeMap::from([("content-type".into(),content_type.into()),("cache-control".into(),"no-store".into()),("content-security-policy".into(),"default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'".into()),("x-content-type-options".into(),"nosniff".into()),("referrer-policy".into(),"no-referrer".into())]),body:body.to_vec()})
+    }
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn dashboard_asset(&self, _request: &Request) -> Option<Response> {
+        None
     }
     pub(crate) async fn admin_identity(&self, request: &Request) -> Result<Option<String>> {
         match self.admin_auth(request) {

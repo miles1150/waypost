@@ -71,6 +71,135 @@ pub(crate) fn classify<'a>(method: &str, path: &'a str) -> Route<'a> {
     }
 }
 
+#[cfg(any(test, all(feature = "cloudflare", target_arch = "wasm32")))]
+const ROUTE_WORDS: &[&str] = &[
+    "access-request",
+    "access-requests",
+    "actors",
+    "admin",
+    "audit",
+    "blobs",
+    "cleanup",
+    "collections",
+    "commit",
+    "connection-status",
+    "consumers",
+    "content",
+    "dashboard",
+    "describe",
+    "disable",
+    "edit",
+    "encrypt",
+    "health",
+    "inbox",
+    "inspect",
+    "invitation",
+    "invitations",
+    "locales",
+    "maintenance",
+    "mcp",
+    "memory",
+    "messages",
+    "owner-credential",
+    "prepare",
+    "preview",
+    "primary-assistant",
+    "privacy",
+    "read",
+    "ready",
+    "receipts",
+    "registry",
+    "revisions",
+    "session",
+    "spaces",
+    "status",
+    "submissions",
+    "tokens",
+    "uploads",
+    "v0",
+];
+
+/// Stable route for logs. Resource ids are replaced with `:id`.
+#[cfg(any(test, all(feature = "cloudflare", target_arch = "wasm32")))]
+pub(crate) fn route_label(method: &str, path: &str) -> String {
+    let verb = match method {
+        "GET" | "POST" | "PUT" | "DELETE" | "HEAD" | "OPTIONS" | "PATCH" => method,
+        _ => "UNKNOWN",
+    };
+    let pattern = match classify(method, path) {
+        Route::PublicAsset => match path {
+            "/" => "/",
+            "/dashboard" | "/dashboard/" => "/dashboard",
+            "/dashboard/app.js" => "/dashboard/app.js",
+            "/dashboard/i18n.js" => "/dashboard/i18n.js",
+            "/dashboard/memory.js" => "/dashboard/memory.js",
+            "/dashboard/style.css" => "/dashboard/style.css",
+            "/dashboard/locales/en.json" => "/dashboard/locales/en.json",
+            "/dashboard/locales/zh.json" => "/dashboard/locales/zh.json",
+            _ => "/dashboard",
+        }
+        .to_owned(),
+        _ => templated_path(path),
+    };
+    format!("{verb} {pattern}")
+}
+
+#[cfg(any(test, all(feature = "cloudflare", target_arch = "wasm32")))]
+fn templated_path(path: &str) -> String {
+    if path == "/" {
+        return "/".into();
+    }
+    if !path.starts_with('/') || path.len() > 512 {
+        return "/unknown".into();
+    }
+    let segments = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    if segments.is_empty() || segments.len() > 12 {
+        return "/unknown".into();
+    }
+    let templated = segments
+        .into_iter()
+        .map(|segment| {
+            if ROUTE_WORDS.contains(&segment) {
+                segment
+            } else {
+                ":id"
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    format!("/{templated}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::route_label;
+
+    #[test]
+    fn route_label_keeps_patterns_and_drops_ids() {
+        assert_eq!(route_label("GET", "/health"), "GET /health");
+        assert_eq!(
+            route_label("GET", "/dashboard/app.js"),
+            "GET /dashboard/app.js"
+        );
+        assert_eq!(
+            route_label("GET", "/v0/messages/msg_123"),
+            "GET /v0/messages/:id"
+        );
+        assert_eq!(
+            route_label("POST", "/admin/v0/spaces/space_1/memory/col_2/read"),
+            "POST /admin/v0/spaces/:id/memory/:id/read"
+        );
+        let hidden = route_label("GET", "/v0/blobs/secret-token-value");
+        assert_eq!(hidden, "GET /v0/blobs/:id");
+        assert!(!hidden.contains("secret"));
+        assert_eq!(route_label("TRACE", "/health"), "UNKNOWN /health");
+        assert_eq!(route_label("GET", "/not-a-route"), "GET /:id");
+    }
+}
+
 pub struct Request {
     pub method: String,
     pub path: String,
