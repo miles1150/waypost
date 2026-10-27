@@ -1,3 +1,5 @@
+# Local profile for `wrangler dev --local`. Remote deploy uses
+# wrangler.production.toml; see DEPLOY-CLOUDFLARE.md.
 name = "waypost"
 main = "build/index.js"
 compatibility_date = "2026-07-17"
