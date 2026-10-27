@@ -13,7 +13,13 @@ command = "worker-build --release --no-default-features --features cloudflare"
 DEPLOYMENT_ENV = "production"
 PUBLIC_ORIGIN = "https://waypost-production.your-subdomain.workers.dev"
 
+# Logs stay at 10% so invocation volume stays bounded.
+# Traces are separate from logs; `observability.enabled` does not turn them on.
 [observability]
+enabled = true
+head_sampling_rate = 0.1
+
+[observability.traces]
 enabled = true
 head_sampling_rate = 0.1
 
