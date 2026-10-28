@@ -2,6 +2,8 @@
 
 以下提示词用于交给 **Grok Bot** 配置接入。它不代表新版已部署或已经完成真实 Grok、MCP 或 Mac mini 验收。必须先通过 describe 确认服务模型。官方依据见 [routines 调研](reviews/2026-10-28-grok-routines-research.md)；桥接安装与配置以 [bridge README](../bridge/README.md) 为准。
 
+从零安装和完整 webhook JSON 见[接收配置教程](receiver-setup.md#webhook)。本文件侧重 Grok 宿主的处理规则；不会替你安装或启动 bridge。当前并发重复处理问题尚未修复，以下持久化和互斥要求不能当作实际实现已通过验收的证明。
+
 ## 可复制给 Grok Bot 的提示词
 
 ```text

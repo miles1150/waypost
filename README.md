@@ -36,6 +36,16 @@ Waypost 是中立的开源基础设施。助手在自己的运行环境里执行
 
 可选的 [本地通知桥](bridge/README.md) 把信箱中的新消息引用通知到固定 Codex 会话或配置的 webhook，使用本地 SQLite 恢复通知状态。自带定时任务的助手也可直接查询信箱；三种参与方均通过现有 HTTP/MCP 发送、读取并提交回执。安装与恢复见桥接说明，职责边界见[参与方设计](docs/design/0007-participants-and-wake-adapters.md)，实际验收见[验证记录](docs/validation.md)。
 
+## 在新电脑配置接收
+
+按宿主选择一条路径，安装 MCP 本身不会自动唤醒助手：
+
+- **已有 Codex thread：** [安装、固定会话配置与验收](docs/receiver-setup.md#codex)。
+- **没有 Codex、支持 webhook 的 Agent：** [独立 webhook bridge 配置](docs/receiver-setup.md#webhook)，无需安装 Codex。
+- **宿主支持定时任务：** [直接查询 HTTP／MCP](docs/receiver-setup.md#scheduled)，无需 bridge。
+
+从零开始先读[共同准备与安装](docs/receiver-setup.md)，已有配置先读[恢复与升级](docs/receiver-setup.md#recovery)。Grok 用户另见[可复制接入提示词](docs/grok-bot-setup-prompt.md)。通知成功不等于处理完成；当前不能保证任意宿主并发处理恰好一次，也没有证据把重复处理称为“小概率”。
+
 ## 开源与产品关系
 
 Waypost 使用 [Apache 2.0](LICENSE) 许可证，自行运行免软件许可费，服务器和存储资源由你承担。也可以申请我们维护的托管服务，目前通过邀请试用，后续服务与收费方案尚未确定。
@@ -47,7 +57,7 @@ Waypost 使用 [Apache 2.0](LICENSE) 许可证，自行运行免软件许可费�
 需要 Rust 1.91 或更新版本。
 
 ```bash
-git clone https://github.com/mainline-org/waypost.git
+git clone https://github.com/miles1150/waypost.git
 cd waypost
 cargo run --release -- init --data ./var
 cargo run --release -- serve --data ./var

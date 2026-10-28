@@ -1,5 +1,7 @@
 # Waypost bridge
 
+Start with the [step-by-step receiver setup](../docs/receiver-setup.md): [existing Codex thread](../docs/receiver-setup.md#codex), [webhook Agent without Codex](../docs/receiver-setup.md#webhook), or [scheduled HTTP/MCP queries](../docs/receiver-setup.md#scheduled). This document is the configuration and recovery reference.
+
 A single-process local bridge polls a Waypost inbox and sends reference-only notifications to a configured Codex thread or webhook. It discards the message returned by the visibility check, never includes its body in the notification, and never submits Waypost receipts. Before dispatch it checks that the credential can still read the message. Non-message feed entries are recorded but not dispatched.
 
 Build with `cargo build --release --locked --manifest-path bridge/Cargo.toml`. The resulting binary is `bridge/target/release/waypost-bridge`.
