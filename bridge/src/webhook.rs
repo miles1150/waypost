@@ -310,43 +310,42 @@ fn parse_trusted_cidrs(values: &[String]) -> Result<Vec<Cidr>> {
     parsed.dedup();
     Ok(parsed)
 }
+fn invalid_cidr(value: &str) -> String {
+    format!("invalid trusted_resolved_cidrs entry {value}")
+}
 fn parse_trusted_cidr(value: &str) -> Result<Cidr> {
     ensure!(
         !value.is_empty() && value.len() <= 128 && !value.contains(char::is_whitespace),
-        "invalid trusted_resolved_cidrs entry {value}"
+        "{}",
+        invalid_cidr(value)
     );
-    let (addr_text, prefix_text) = value
-        .split_once('/')
-        .context("invalid trusted_resolved_cidrs entry {value}")?;
+    let (addr_text, prefix_text) = value.split_once('/').with_context(|| invalid_cidr(value))?;
     ensure!(
         !addr_text.is_empty()
             && !prefix_text.is_empty()
             && prefix_text.bytes().all(|b| b.is_ascii_digit()),
-        "invalid trusted_resolved_cidrs entry {value}"
+        "{}",
+        invalid_cidr(value)
     );
-    let addr: IpAddr = addr_text
-        .parse()
-        .context("invalid trusted_resolved_cidrs entry {value}")?;
-    let prefix: u8 = prefix_text
-        .parse()
-        .context("invalid trusted_resolved_cidrs entry {value}")?;
+    let addr: IpAddr = addr_text.parse().with_context(|| invalid_cidr(value))?;
+    let prefix: u8 = prefix_text.parse().with_context(|| invalid_cidr(value))?;
     let max = if addr.is_ipv4() { 32 } else { 128 };
-    ensure!(
-        prefix <= max,
-        "invalid trusted_resolved_cidrs entry {value}"
-    );
+    ensure!(prefix <= max, "{}", invalid_cidr(value));
     ensure!(
         prefix > 0,
-        "trusted_resolved_cidrs entry {value} is too broad"
+        "trusted_resolved_cidrs entry {} is too broad",
+        value
     );
     ensure!(
         network_address(addr, prefix),
-        "trusted_resolved_cidrs entry {value} must be a network address"
+        "trusted_resolved_cidrs entry {} must be a network address",
+        value
     );
     let cidr = Cidr { addr, prefix };
     ensure!(
         !overlaps_forbidden(cidr),
-        "trusted_resolved_cidrs entry {value} overlaps a refused range"
+        "trusted_resolved_cidrs entry {} overlaps a refused range",
+        value
     );
     Ok(cidr)
 }
@@ -869,10 +868,14 @@ mod tests {
             let Err(err) = parse_trusted_cidrs(&[bad.into()]) else {
                 panic!("accepted invalid CIDR {bad}");
             };
+            let message = err.to_string();
             assert!(
-                err.to_string().contains("trusted_resolved_cidrs"),
-                "{bad}: {err}"
+                message.contains("trusted_resolved_cidrs") && !message.contains("{value}"),
+                "{bad}: {message}"
             );
+            if !bad.is_empty() {
+                assert!(message.contains(bad), "{bad}: {message}");
+            }
         }
     }
 }

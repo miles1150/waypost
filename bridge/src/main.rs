@@ -981,25 +981,34 @@ printf '%s\n' '{"id":2,"result":{"thread":{"id":"12345678-1234-1234-1234-1234567
         let trusted = webhook_config(dir.path(), Some(json!(["198.18.0.0/15", "10.0.0.0/8"])));
         assert!(config(&trusted).is_ok());
         for bad in [
-            json!(["0.0.0.0/0"]),
-            json!(["::/0"]),
-            json!(["127.0.0.0/8"]),
-            json!(["127.0.0.1/32"]),
-            json!(["169.254.0.0/16"]),
-            json!(["169.254.169.254/32"]),
-            json!(["198.18.0.1/15"]),
-            json!(["198.18.0.0/99"]),
-            json!(["not-a-cidr"]),
-            json!(["198.18.0.0/15", "0.0.0.0/0"]),
+            "0.0.0.0/0",
+            "::/0",
+            "127.0.0.0/8",
+            "127.0.0.1/32",
+            "169.254.0.0/16",
+            "169.254.169.254/32",
+            "198.18.0.1/15",
+            "198.18.0.0/99",
+            "not-a-cidr",
         ] {
-            let path = webhook_config(dir.path(), Some(bad));
+            let path = webhook_config(dir.path(), Some(json!([bad])));
             let Err(err) = config(&path) else {
-                panic!("accepted invalid trusted_resolved_cidrs");
+                panic!("accepted invalid trusted_resolved_cidrs {bad}");
             };
+            let message = err.to_string();
             assert!(
-                err.to_string().contains("trusted_resolved_cidrs"),
-                "{err:#}"
+                message.contains(bad) && !message.contains("{value}"),
+                "{bad}: {message}"
             );
         }
+        let path = webhook_config(dir.path(), Some(json!(["198.18.0.0/15", "0.0.0.0/0"])));
+        let Err(err) = config(&path) else {
+            panic!("accepted a list containing 0.0.0.0/0");
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("0.0.0.0/0") && !message.contains("{value}"),
+            "{message}"
+        );
     }
 }
