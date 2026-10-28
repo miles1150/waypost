@@ -39,7 +39,7 @@ proptest! {
             assert_eq!(f.app.handle(upload_request(&f.writer_token,id,bytes.clone())).await.status,409);
             let reopened=open(f.dir.path());let bid=sealed["blob_id"].as_str().unwrap();
             let r=reopened.handle(Request::json("GET",&format!("/v0/blobs/{bid}/content"),&f.writer_token,json!({}))).await;assert_eq!(r.status,200);assert_eq!(r.body,bytes);
-            assert_eq!(raw(&reopened,"GET",&format!("/v0/blobs/{bid}"),&f.reader_token,json!({})).await.0,404);
+            assert_eq!(raw(&reopened,"GET",&format!("/v0/blobs/{bid}"),&f.reader_token,json!({})).await.0,200);
             call(&reopened,"POST","/v0/messages",&f.writer_token,json!({"request_id":"with-attachment","kind":"info","subject":"Attached","body":{"text":"Portable bytes"},"attachment_ids":[bid]})).await;
             let visible=reopened.handle(Request::json("GET",&format!("/v0/blobs/{bid}/content"),&f.reader_token,json!({}))).await;assert_eq!(visible.status,200);assert_eq!(visible.body,bytes);
         });

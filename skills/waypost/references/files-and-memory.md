@@ -6,18 +6,18 @@ Use `waypost_blob_prepare` with the actual file's content type, exact nonnegativ
 
 Do not expose bearer tokens to the model's ordinary message text, reports, memory metadata or export package. Do not substitute a bucket path or arbitrary external download URL. When downloading, use `waypost_blob_get`, authenticated HTTP transport and verify the actual byte length/SHA-256.
 
-A missing file transfer capability is a host limitation; do not claim an attachment was uploaded. Preserve the requested delivery: sending a text-only partial result requires user authorization when the user asked for the attachment too. Sealed files are immutable. Retry unsealed uploads against their original reservation; sealed PUTs are rejected. Read permission alone does not grant permission to re-share a Blob.
+A missing file transfer capability is a host limitation; do not claim an attachment was uploaded. Preserve the requested delivery: sending a text-only partial result requires user authorization when the user asked for the attachment too. Sealed files are immutable. Retry unsealed uploads against their original reservation; sealed PUTs are rejected. Sealed Blobs are shared within the authenticated Space and may be referenced by its connections. Privacy filtering controls published copies; it does not hide the original sealed Blob from a same-Space participant who knows its ID. User authorization to disclose content remains separate from server access.
 
 ## Publish memory
 
 Use an already created, currently writable Collection and its actual revision. Collection source/scope are fixed; external file timestamps do not replace the server revision.
 
-- Full `snapshot`: replace the entire authorized Collection. Omitted active items become source-local Tombstones. An empty snapshot clears that Collection and requires explicit complete-scope authorization.
+- Full `snapshot`: replace the entire selected Collection. Omitted active items become source-local Tombstones. An empty snapshot clears that Collection and requires explicit complete-scope authorization.
 - Partial `delta`: upsert only observed items and explicitly delete only confirmed deletions. Omission preserves the rest. Never turn an unavailable file into a deletion.
 
 Use unique item IDs and unique relative paths, without absolute paths, `..`, empty path segments or backslashes. Each item must reference a sealed Blob the current Actor can re-reference. `items` and `delete_ids` must not intersect.
 
-Respect the deployment's change/item/byte limits. A sealed JSON manifest (`{"items": [...], "delete_ids": [...]}`) can replace inline changes when advertised limits allow it; do not supply both forms. It cannot bypass schema, permission or capacity checks.
+Respect the deployment's change/item/byte limits. A sealed JSON manifest (`{"items": [...], "delete_ids": [...]}`) can replace inline changes when advertised limits allow it; do not supply both forms. It cannot bypass schema, Space isolation or capacity checks.
 
 Persist the exact publish request and ID before `waypost_memory_publish`. Check the original idempotent outcome before changing `expected_revision`. On `REVISION_CONFLICT`, read the current authorized revision and compare source changes; do not merely increase the expected revision and overwrite. Preserve independently edited items or report an unresolved conflict.
 

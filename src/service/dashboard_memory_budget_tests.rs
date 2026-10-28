@@ -104,7 +104,7 @@ async fn two_phase_owner_edits_fit_the_worker_query_budget_at_collection_capacit
         json!({"request_id":"consumer","actor_id":writer["actor_id"],"view":"inbox","filter":{}}),
     )
     .await;
-    let issued=call(&app,"POST",&format!("{base}/tokens"),ADMIN,json!({"request_id":"token","actor_id":writer["actor_id"],"consumer_id":consumer["consumer_id"],"scopes":["blob.write","memory.write"],"resource_grants":{}})).await;
+    let issued=call(&app,"POST",&format!("{base}/tokens"),ADMIN,json!({"request_id":"token","actor_id":writer["actor_id"],"consumer_id":consumer["consumer_id"]})).await;
     let token = issued["token"].as_str().unwrap();
     let text = b"Original";
     let upload=call(&app,"POST","/v0/uploads",token,json!({"request_id":"upload","content_type":"text/plain","size_bytes":text.len(),"sha256":hex::encode(Sha256::digest(text))})).await;

@@ -22,7 +22,7 @@ import threading
 import time
 import uuid
 
-from verify_bridge_permissions import Client, Failure, check, private_write
+from verify_space_membership import Client, Failure, check, private_write
 
 
 KINDS = ('webhook', 'codex', 'scheduled')
@@ -124,16 +124,14 @@ class NativeFixture:
                 {'request_id': kind + '-consumer', 'actor_id': actor['actor_id'], 'view': 'inbox',
                  'filter': {}})
             self.participants[kind] = {'actor': actor['actor_id'], 'consumer': consumer['consumer_id']}
-        recipients = [p['actor'] for p in self.participants.values()]
         for kind, participant in self.participants.items():
             token = self.control.request('POST', self.admin_root + '/tokens',
                 {'request_id': kind + '-token', 'actor_id': participant['actor'],
-                 'consumer_id': participant['consumer'], 'scopes': ['message.send', 'message.read', 'receipt.write'],
-                 'resource_grants': {'recipient_ids': recipients}})
+                 'consumer_id': participant['consumer']})
             participant.update(token=token['token'], token_id=token['token_id'], client=Client(self.url, token['token']))
             bridge_token = self.control.request('POST', self.admin_root + '/tokens',
                 {'request_id': kind + '-bridge-token', 'actor_id': participant['actor'],
-                 'consumer_id': participant['consumer'], 'scopes': ['message.read'], 'resource_grants': {}})
+                 'consumer_id': participant['consumer']})
             participant.update(bridge_token=bridge_token['token'], bridge_token_id=bridge_token['token_id'],
                                bridge_client=Client(self.url, bridge_token['token']))
 
@@ -153,13 +151,25 @@ class NativeFixture:
         with sqlite3.connect('file:' + str(self.data / 'metadata.sqlite') + '?mode=ro', uri=True) as db:
             return db.execute('SELECT count(*) FROM receipts').fetchone()[0]
 
-    def permissions(self, kind, scopes):
+    def route(self, kind, destination):
         participant = self.participants[kind]
-        path = self.admin_root + '/tokens/' + participant['bridge_token_id'] + '/permissions'
+        path = self.admin_root + '/tokens/' + participant['bridge_token_id'] + '/routing'
         detail = self.control.request('GET', path)
         return self.control.request('PUT', path, {'request_id': uuid.uuid4().hex,
-            'expected_authority_version': detail['authority_version'], 'scopes': scopes,
-            'resource_grants': detail['resource_grants'], 'default_recipient_id': detail['default_recipient_id']})
+            'expected_authority_version': detail['authority_version'],
+            'default_recipient_id': destination})
+
+    def revoke_bridge(self, kind):
+        participant = self.participants[kind]
+        self.control.request('DELETE', self.admin_root + '/tokens/' + participant['bridge_token_id'])
+
+    def replace_bridge(self, kind):
+        participant = self.participants[kind]
+        issued = self.control.request('POST', self.admin_root + '/tokens',
+            {'request_id': kind + '-replacement', 'actor_id': participant['actor'],
+             'consumer_id': participant['consumer']})
+        participant.update(bridge_token=issued['token'], bridge_token_id=issued['token_id'],
+                           bridge_client=Client(self.url, issued['token']))
 
 
 def read_all(participant, limit=1):
@@ -351,14 +361,14 @@ def run(args):
             before_counts = (len(webhook.deliveries), len(queue_log.read_text().splitlines()))
             checks.append('webhook accepted then lost response stays unknown; explicit retry preserves delivery ID')
             for kind in ('webhook', 'codex'):
-                fixture.permissions(kind, ['message.read', 'memory.read'])
+                fixture.route(kind, fixture.participants['scheduled']['actor'])
                 participant = fixture.participants[kind]
-                participant['bridge_client'].denied('POST', '/v0/inbox/read',
-                    {'consumer_id': participant['consumer'], 'cursor': cursors[kind]}, 'CURSOR_SCOPE_CHANGED')
+                participant['bridge_client'].request('POST', '/v0/inbox/read',
+                    {'consumer_id': participant['consumer'], 'cursor': cursors[kind]})
                 bridge_once(args.bridge_binary, configs[kind])
             check(before_counts == (len(webhook.deliveries), len(queue_log.read_text().splitlines())),
-                  'read-scope expansion re-notified old messages')
-            checks.append('reading-scope expansion resets cursors without duplicate notifications')
+                  'routing change re-notified old messages')
+            checks.append('default routing changes preserve cursors without duplicate notifications')
             for kind in ('webhook', 'codex'):
                 pending = fixture.participants['scheduled']['client'].request('POST', '/v0/messages',
                     {'request_id': kind + '-pending-revoke', 'recipient_ids': [fixture.participants[kind]['actor']],
@@ -367,17 +377,19 @@ def run(args):
                 with sqlite3.connect(root / (kind + '-state') / 'state.sqlite3') as state:
                     check(state.execute('SELECT status FROM items WHERE resource_id=?', (pending['message_id'],)).fetchone() == ('pending',),
                           'scan did not persist pending notification')
-                fixture.permissions(kind, [])
+                fixture.revoke_bridge(kind)
                 bridge_once(args.bridge_binary, configs[kind], expect_success=False)
             check(before_counts == (len(webhook.deliveries), len(queue_log.read_text().splitlines())),
-                  'revoked read permission still dispatched')
-            checks.append('read-scope removal blocks already-persisted pending work in both adapters')
+                  'revoked connection still dispatched')
+            checks.append('connection revocation blocks already-persisted pending work in both adapters')
             for kind in ('webhook', 'codex'):
-                fixture.permissions(kind, ['message.read'])
+                fixture.replace_bridge(kind)
+                # Existing synthetic credential file is private and bridge is stopped here.
+                (root / (kind + '-token')).write_text(fixture.participants[kind]['bridge_token'])
                 bridge_once(args.bridge_binary, configs[kind])
             check((len(webhook.deliveries), len(queue_log.read_text().splitlines())) ==
-                  (before_counts[0] + 1, before_counts[1] + 1), 'restoring read scope did not dispatch pending work exactly once')
-            checks.append('restored read scope dispatches pending references once')
+                  (before_counts[0] + 1, before_counts[1] + 1), 'replacement connection did not dispatch pending work exactly once')
+            checks.append('replacement connection with unchanged identity dispatches pending references once')
             # One explicitly chosen reply demonstrates correlation without an automatic reply loop.
             original = next(row for row in matrix if row['source'] == 'codex' and row['target'] == 'scheduled')
             reply_body = {'request_id': 'one-explicit-result', 'recipient_ids': [fixture.participants['codex']['actor']],

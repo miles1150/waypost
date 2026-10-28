@@ -102,13 +102,6 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             .await?;
         rows.first().cloned().ok_or_else(Error::not_found)
     }
-    pub(crate) fn can_read_collection(&self, p: &Principal, row: &Row) -> Result<bool> {
-        Ok(p.has("memory.read")
-            && (text(row, "source_actor_id")? == p.actor_id
-                || p.grants
-                    .memory_read_collection_ids
-                    .contains(&text(row, "collection_id")?)))
-    }
     async fn revision_items(
         &self,
         space: &str,
@@ -156,7 +149,6 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         cid: &str,
         value: Value,
     ) -> Result<Value> {
-        p.require("memory.write")?;
         let input: Publish = crate::json::decode(value.clone())?;
         check_request_id(&input.request_id)?;
         if input.collection_id.as_ref().is_some_and(|v| v != cid) {
@@ -166,14 +158,6 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             return Err(Error::invalid("Invalid expected revision."));
         }
         let collection = self.collection(p, cid).await?;
-        if text(&collection, "source_actor_id")? != p.actor_id
-            && !p
-                .grants
-                .memory_write_collection_ids
-                .contains(&cid.to_string())
-        {
-            return Err(Error::forbidden());
-        }
         let mut normalized = value;
         normalized
             .as_object_mut()
@@ -480,9 +464,6 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             return Err(Error::invalid("Collection does not match path."));
         }
         let collection = self.collection(p, cid).await?;
-        if !self.can_read_collection(p, &collection)? {
-            return Err(Error::not_found());
-        }
         let tomb = match value.get("include_tombstones") {
             None => false,
             Some(Value::Bool(v)) => *v,
@@ -505,14 +486,15 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                     .ok_or_else(|| Error::new("INVALID_CURSOR", "Invalid cursor."))?,
             )?;
             let f = payload.split('|').collect::<Vec<_>>();
-            if f.len() != 8 || f[0] != "m1" {
+            if f.len() != 8 || !matches!(f[0], "m1" | "m2") {
                 return Err(Error::new("INVALID_CURSOR", "Invalid cursor."));
             }
-            if f[1] != p.space_id
+            if f[0] != "m2"
+                || f[1] != p.space_id
                 || f[2] != p.actor_id
                 || f[3] != cid
                 || f[5] != tomb.to_string()
-                || f[6] != p.grant_fingerprint
+                || f[6] != "space-shared"
             {
                 return Err(Error::new(
                     "CURSOR_SCOPE_CHANGED",
@@ -554,8 +536,8 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         let counts = counts.first().ok_or_else(Error::storage)?;
         self.current(p).await?;
         let cursor = self.sign_cursor(&format!(
-            "m1|{}|{}|{}|{}|{}|{}|{}",
-            p.space_id, p.actor_id, cid, revision, tomb, p.grant_fingerprint, after
+            "m2|{}|{}|{}|{}|{}|space-shared|{}",
+            p.space_id, p.actor_id, cid, revision, tomb, after
         ))?;
         Ok(
             json!({"collection_id":cid,"source_actor_id":text(&collection,"source_actor_id")?,"scope":text(&collection,"scope")?,"revision":revision,"manifest_blob_id":revision_row.as_ref().and_then(|r|optional_text(r,"manifest_blob_id")),"items":items,"has_more":more,"next_cursor":cursor,"active_items":integer(counts,"active")?,"tombstones":integer(counts,"total")?-integer(counts,"active")?}),

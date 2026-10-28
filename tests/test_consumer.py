@@ -74,23 +74,24 @@ class ConsumerContracts(unittest.TestCase):
         receipts = source.request('POST', '/v0/inbox/read', {'consumer_id': identity['consumer_id']})['items']
         self.assertEqual([r['data']['stage'] for r in receipts], ['received', 'processed'])
 
-    def test_actor_outbox_survives_current_permission_loss_and_consumer_rotation(self):
+    def test_actor_outbox_survives_credential_revocation_and_consumer_rotation(self):
         from consumer import ApiError
         trial=setup(self.url, ADMIN)
         owner=trial['owner'];control=Client(self.url,ADMIN);sid=trial['space']['space_id'];aid=trial['space']['default_actor_id']
         root='/admin/v0/spaces/'+sid
-        read_only=control.request('POST',root+'/tokens',{'request_id':trial['prefix']+'-read-only','actor_id':aid,'consumer_id':trial['space']['default_consumer_id'],'scopes':['message.read'],'resource_grants':{}})
+        temporary=control.request('POST',root+'/tokens',{'request_id':trial['prefix']+'-temporary','actor_id':aid,'consumer_id':trial['space']['default_consumer_id']})
         next_consumer=control.request('POST',root+'/consumers',{'request_id':trial['prefix']+'-next-consumer','actor_id':aid,'view':'inbox','filter':{}})
-        rotated=control.request('POST',root+'/tokens',{'request_id':trial['prefix']+'-rotated','actor_id':aid,'consumer_id':next_consumer['consumer_id'],'scopes':['message.send','message.read'],'resource_grants':{'recipient_ids':[trial['instict']['actor_id']]}})
+        rotated=control.request('POST',root+'/tokens',{'request_id':trial['prefix']+'-rotated','actor_id':aid,'consumer_id':next_consumer['consumer_id']})
         body={'request_id':trial['prefix']+'-queued','recipient_ids':[trial['instict']['actor_id']],'kind':'info','subject':'Resume original','body':{'text':'An actor-stable queued write.'}}
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/'producer.sqlite'
             original=Consumer(path,owner)
             with original.db: original.enqueue('message.send','/v0/messages',body)
             original.close()
-            limited=Consumer(path,Client(self.url,read_only['token']))
+            limited=Consumer(path,Client(self.url,temporary['token']))
+            control.request('DELETE',root+'/tokens/'+temporary['token_id'])
             with self.assertRaises(ApiError) as rejected: limited.deliver('message.send',body['request_id'])
-            self.assertEqual(rejected.exception.code,'FORBIDDEN');limited.close()
+            self.assertEqual(rejected.exception.code,'UNAUTHENTICATED');limited.close()
             resumed=Consumer(path,Client(self.url,rotated['token']));resumed.recover();resumed.recover();resumed.close()
         target=trial['target'];identity=target.request('GET','/v0/describe')
         feed=target.request('POST','/v0/inbox/read',{'consumer_id':identity['consumer_id']})
@@ -165,6 +166,27 @@ class ConsumerContracts(unittest.TestCase):
             self.assertEqual(upgraded.db.execute('SELECT state FROM outbound_requests').fetchone()[0], 'committed')
             self.assertIsNone(upgraded.db.execute("SELECT name FROM sqlite_master WHERE name='outbox'").fetchone())
             upgraded.close()
+
+    def test_legacy_binding_ledger_requires_explicit_migration_without_losing_pending_work(self):
+        trial = setup(self.url, ADMIN)
+        body = {'request_id': trial['prefix'] + '-pending-old-binding', 'kind': 'info',
+                'subject': 'Preserve', 'body': {'text': 'Do not silently replace my ledger.'}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'legacy.sqlite'
+            current = Consumer(path, trial['source'])
+            with current.db:
+                current.enqueue('message.send', '/v0/messages', body)
+                current.db.execute('INSERT INTO cursors VALUES(?,?)', ('old-grants-hash', 'old-cursor'))
+                current.db.execute('DELETE FROM consumer_format')
+            current.close()
+            with self.assertRaisesRegex(RuntimeError, 'explicit migration'):
+                Consumer(path, trial['source'])
+            with sqlite3.connect(path) as db:
+                self.assertEqual(db.execute('SELECT binding,cursor FROM cursors').fetchall(),
+                                 [('old-grants-hash', 'old-cursor')])
+                self.assertEqual(db.execute('SELECT request_id FROM outbound_requests').fetchall(),
+                                 [(body['request_id'],)])
+                self.assertEqual(db.execute('SELECT count(*) FROM consumer_format').fetchone()[0], 0)
 
     def test_export_downloads_exact_historical_bytes_and_excludes_connection_credentials(self):
         trial = setup(self.url, ADMIN)

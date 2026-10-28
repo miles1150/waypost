@@ -177,6 +177,7 @@ async fn privacy_filters_recipient_traffic_and_text_attachments_but_blocks_unins
         )
         .await;
         assert_eq!(metadata["filename"], "[REDACTED]");
+        // Publication is redacted, but sealed originals are shared within the Space.
         assert_eq!(
             raw(
                 &f.app,
@@ -187,7 +188,7 @@ async fn privacy_filters_recipient_traffic_and_text_attachments_but_blocks_unins
             )
             .await
             .0,
-            404
+            200
         );
     }
     assert_eq!(f.inbox().await["items"].as_array().unwrap().len(), 1);

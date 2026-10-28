@@ -7,7 +7,6 @@ use crate::{
 
 impl<D: Database, O: ObjectStore> App<D, O> {
     pub(crate) async fn blob_prepare(&self, p: &Principal, value: Value) -> Result<Value> {
-        p.require("blob.write")?;
         fields(
             &value,
             &[
@@ -144,7 +143,6 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         id: &str,
         request: &Request,
     ) -> Result<Value> {
-        p.require("blob.write")?;
         let row = self.upload(p, id).await?;
         let upload = crate::storage::rows::Upload::decode(&row)?;
         upload.writable(self.clock.now_ms())?;
@@ -187,7 +185,6 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         Ok(json!({"upload_id":id,"already_uploaded":existing.is_some()}))
     }
     pub(crate) async fn blob_commit(&self, p: &Principal, id: &str, value: Value) -> Result<Value> {
-        p.require("blob.write")?;
         fields(&value, &["request_id", "upload_id"])?;
         if value
             .get("upload_id")
@@ -289,11 +286,6 @@ impl<D: Database, O: ObjectStore> App<D, O> {
     }
     pub(crate) async fn reference_blob(&self, p: &Principal, id: &str) -> Result<Row> {
         let row = self.sealed_blob(p, id).await?;
-        if text(&row, "owner_actor_id")? != p.actor_id
-            && !p.grants.blob_reference_ids.contains(&id.to_string())
-        {
-            return Err(Error::forbidden());
-        }
         self.current(p).await?;
         Ok(row)
     }
@@ -304,31 +296,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         )
     }
     pub(crate) async fn readable_blob(&self, p: &Principal, id: &str) -> Result<Row> {
-        let row = self.sealed_blob(p, id).await?;
-        if text(&row, "owner_actor_id")? == p.actor_id
-            || p.grants.blob_reference_ids.contains(&id.to_string())
-        {
-            self.current(p).await?;
-            return Ok(row);
-        }
-        if p.has("message.read") || p.has("space.observe") {
-            let rows=self.db.query(Statement::new("SELECT 1 AS readable FROM message_attachments a JOIN messages m ON m.space_id=a.space_id AND m.message_id=a.message_id WHERE a.space_id=? AND a.blob_id=? AND (?=1 OR m.producer_id=? OR EXISTS(SELECT 1 FROM message_recipients r WHERE r.space_id=m.space_id AND r.message_id=m.message_id AND r.actor_id=?)) LIMIT 1",vec![p.space_id.clone().into(),id.into(),p.has("space.observe").into(),p.actor_id.clone().into(),p.actor_id.clone().into()])).await?;
-            if !rows.is_empty() {
-                self.current(p).await?;
-                return Ok(row);
-            }
-        }
-        if p.has("memory.read") {
-            let collections=self.db.query(Statement::new("SELECT DISTINCT c.* FROM memory_collections c LEFT JOIN memory_revision_items i ON i.space_id=c.space_id AND i.collection_id=c.collection_id LEFT JOIN memory_revisions r ON r.space_id=c.space_id AND r.collection_id=c.collection_id WHERE c.space_id=? AND (i.blob_id=? OR r.manifest_blob_id=?)",vec![p.space_id.clone().into(),id.into(),id.into()])).await?;
-            if collections
-                .iter()
-                .any(|c| self.can_read_collection(p, c).unwrap_or(false))
-            {
-                self.current(p).await?;
-                return Ok(row);
-            }
-        }
-        Err(Error::not_found())
+        self.reference_blob(p, id).await
     }
     pub(crate) async fn blob_get(&self, p: &Principal, id: &str) -> Result<Value> {
         let row = self.readable_blob(p, id).await?;

@@ -24,8 +24,8 @@ Burnt Ends is reported booked by Instinct; flights still open. Muse lists done i
 
 A successful submission only means the message is kept. Waypost never verifies the restaurant's real order; whether the booking stands follows the restaurant's confirmation.
 
-## Which permissions to open
+## Connection and collection setup
 
-Grant Instinct permission to send to Muse, naming Muse when sending. Muse needs collect and receipt abilities, keeping send so it can report to you. To deliver confirmation files, open attachment upload plus matching read permission.
+Connect Instinct and Muse to the same space, and address Muse when sending. Muse collects through its host schedule or bridge. Connections can upload and reference attachments without per-connection grants.
 
 Steps are in the [lead-assistant setup guide](/guide/#main-assistant).

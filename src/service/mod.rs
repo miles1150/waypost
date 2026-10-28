@@ -1,6 +1,6 @@
 use crate::storage::queries::guarded_inserts as push_rows;
 use crate::{
-    domain::{FeedFilter, Principal, ResourceGrants},
+    domain::{FeedFilter, Principal},
     error::{Error, Result},
     http::{Request, Response},
     storage::{
@@ -26,7 +26,9 @@ mod memory;
 mod onboarding;
 mod privacy;
 mod receipts;
-mod token_permissions;
+mod token_routing;
+#[cfg(all(test, feature = "native"))]
+mod token_routing_tests;
 
 #[derive(Clone)]
 pub struct Config {
@@ -253,12 +255,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         let row = rows.first().ok_or_else(Error::unauthenticated)?;
         fn decoded<T: serde::de::DeserializeOwned>(row: &Row, key: &str) -> Result<T> {
             serde_json::from_str(&text(row, key)?)
-                .map_err(|_| Error::internal("decode authentication grants"))
-        }
-        #[derive(serde::Deserialize)]
-        struct CollectionGrant {
-            collection_id: String,
-            action: String,
+                .map_err(|_| Error::internal("decode authentication filters"))
         }
         #[derive(serde::Deserialize)]
         struct FilterEntry {
@@ -266,19 +263,6 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             value: String,
         }
         let token_id = text(row, "token_id")?;
-        let scopes: Vec<String> = decoded(row, "scopes_json")?;
-        let mut grants = ResourceGrants {
-            recipient_ids: decoded(row, "recipients_json")?,
-            blob_reference_ids: decoded(row, "blobs_json")?,
-            ..Default::default()
-        };
-        for grant in decoded::<Vec<CollectionGrant>>(row, "collections_json")? {
-            match grant.action.as_str() {
-                "read" => grants.memory_read_collection_ids.push(grant.collection_id),
-                "write" => grants.memory_write_collection_ids.push(grant.collection_id),
-                _ => return Err(Error::internal("decode grant action")),
-            }
-        }
         let space_id = text(row, "space_id")?;
         let consumer_id = text(row, "consumer_id")?;
         let mut filter = FeedFilter::default();
@@ -291,7 +275,6 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                 _ => return Err(Error::internal("decode filter dimension")),
             }
         }
-        let grant_fingerprint = fingerprint(&json!({"scopes":scopes,"grants":grants}))?;
         let filter_fingerprint =
             fingerprint(&serde_json::to_value(&filter).map_err(|_| Error::storage())?)?;
         Ok(Principal {
@@ -306,10 +289,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             default_actor_id: text(row, "default_actor_id")?,
             default_recipient_id: text(row, "default_recipient_id")?,
             view: text(row, "view")?,
-            scopes,
-            grants,
             filter,
-            grant_fingerprint,
             filter_fingerprint,
         })
     }
@@ -337,19 +317,14 @@ impl<D: Database, O: ObjectStore> App<D, O> {
     pub(crate) async fn describe(&self, p: &Principal) -> Result<Value> {
         self.current(p).await?;
         let mut collections = vec![];
-        let mut more = false;
-        if p.has("memory.read") || p.has("memory.write") {
-            let rows=self.db.query(Statement::new("SELECT c.* FROM memory_collections c WHERE c.space_id=? AND (c.source_actor_id=? OR EXISTS(SELECT 1 FROM token_collections tc WHERE tc.token_id=? AND tc.space_id=c.space_id AND tc.collection_id=c.collection_id AND ((tc.action='read' AND ?=1) OR (tc.action='write' AND ?=1)))) ORDER BY c.created_at,c.collection_id LIMIT ?",vec![p.space_id.clone().into(),p.actor_id.clone().into(),p.token_id.clone().into(),p.has("memory.read").into(),p.has("memory.write").into(),((self.limits.max_page_size+1) as i64).into()])).await?;
-            more = rows.len() > self.limits.max_page_size;
-            for row in rows.iter().take(self.limits.max_page_size) {
-                let id = text(row, "collection_id")?;
-                let own = text(row, "source_actor_id")? == p.actor_id;
-                collections.push(json!({"collection_id":id,"source_actor_id":text(row,"source_actor_id")?,"scope":text(row,"scope")?,"display_name":text(row,"display_name")?,"current_revision":integer(row,"current_revision")?,"can_read":p.has("memory.read") && (own || p.grants.memory_read_collection_ids.contains(&id)),"can_write":p.has("memory.write") && (own || p.grants.memory_write_collection_ids.contains(&id))}));
-            }
+        let rows=self.db.query(Statement::new("SELECT c.* FROM memory_collections c WHERE c.space_id=? ORDER BY c.created_at,c.collection_id LIMIT ?",vec![p.space_id.clone().into(),((self.limits.max_page_size+1) as i64).into()])).await?;
+        let more = rows.len() > self.limits.max_page_size;
+        for row in rows.iter().take(self.limits.max_page_size) {
+            collections.push(json!({"collection_id":text(row,"collection_id")?,"source_actor_id":text(row,"source_actor_id")?,"scope":text(row,"scope")?,"display_name":text(row,"display_name")?,"current_revision":integer(row,"current_revision")?,"can_read":true,"can_write":true}));
         }
         self.current(p).await?;
         Ok(
-            json!({"api_version":"0.1","space_id":p.space_id,"actor_id":p.actor_id,"consumer_id":p.consumer_id,"view_revision":p.view_revision,"default_recipient_id":p.default_recipient_id,"allowed_recipient_ids":if p.grants.recipient_ids.is_empty(){vec![p.default_actor_id.clone()]}else{p.grants.recipient_ids.clone()},"scopes":p.scopes,"resource_grants":p.grants,"memory_collections":collections,"memory_collections_has_more":more,"limits":self.limits,"capabilities":{"privacy_filtering":true,"mailbox":true,"receipts":true,"blob_upload":true,"memory_snapshot":true,"memory_delta":true,"webhook_events":false,"oauth":false,"server_export":false}}),
+            json!({"api_version":"0.1","space_id":p.space_id,"actor_id":p.actor_id,"consumer_id":p.consumer_id,"view_revision":p.view_revision,"default_recipient_id":p.default_recipient_id,"access_model":"space_membership","memory_collections":collections,"memory_collections_has_more":more,"limits":self.limits,"capabilities":{"privacy_filtering":true,"mailbox":true,"receipts":true,"blob_upload":true,"memory_snapshot":true,"memory_delta":true,"webhook_events":false,"oauth":false,"server_export":false}}),
         )
     }
     pub(crate) fn sign_cursor(&self, payload: &str) -> Result<String> {

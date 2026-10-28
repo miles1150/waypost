@@ -61,3 +61,8 @@ WAYPOST_TOKEN="<private actor token>" python3 examples/consumer.py export --coll
 这是手动、单次运行的参考客户端，不自动执行收到的任务。未处理输入独立于收取游标；待 ACK 与写请求保留稳定 ID。生产者 outbox 绑定 Actor，ACK 与读取进度绑定 Consumer/视图/权限。宿主可通过自己确实具备的调度机制运行它。
 
 本机队列的领域参数使用固定列与子表：`outbound_requests` 保存稳定 ID、操作、正文与状态；`outbound_values` 保存收件人、资料引用、选项和 ACK；`outbound_memory_items` 保存待发布记忆条目。消息、记忆版本/条目和回执也有独立关系表，可以直接查询。任意 metadata 保留 JSON，原始入站传输内容和提交响应仅作归档。重放从关系行构造并检查稳定摘要，旧试用版 JSON 队列会在事务内升级，保留原请求与待处理状态。
+
+
+## 参考客户端账本升级
+
+新版 `examples/consumer.py` 要求服务的 `describe.access_model` 为 `space_membership`。原参考客户端的 SQLite 绑定含旧 scopes/grants，无法从哈希反推出归属；新版会拒绝静默接管非空旧账本。保留原数据库，在升级前使用旧客户端核对并处理待提交、待 ACK 和未完成工作，再制定显式迁移与去重方案；不要删除账本或换空数据库来绕过提示。这只涉及 Python 参考 consumer，Rust `waypost-bridge` 的旧绑定兼容机制不受此说明影响。

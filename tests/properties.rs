@@ -74,7 +74,7 @@ proptest! {
    }
    assert_eq!(f.writer_inbox().await["items"].as_array().unwrap().len(),transitions);
    let c=call(&f.app,"POST",&format!("/admin/v0/spaces/{}/consumers",f.sid()),ADMIN,json!({"request_id":"second-consumer","actor_id":f.space["default_actor_id"],"view":"inbox","filter":{}})).await;
-   let t=call(&f.app,"POST",&format!("/admin/v0/spaces/{}/tokens",f.sid()),ADMIN,json!({"request_id":"second-token","actor_id":f.space["default_actor_id"],"consumer_id":c["consumer_id"],"scopes":["message.read","receipt.write"],"resource_grants":{}})).await;
+   let t=call(&f.app,"POST",&format!("/admin/v0/spaces/{}/tokens",f.sid()),ADMIN,json!({"request_id":"second-token","actor_id":f.space["default_actor_id"],"consumer_id":c["consumer_id"]})).await;
    let token=t["token"].as_str().unwrap();let result=call(&f.app,"POST","/v0/receipts",token,json!({"request_id":"independent-receipt","consumer_id":c["consumer_id"],"items":[{"item_id":item,"stage":"received"}]})).await;assert_eq!(result["items"][0]["stage"],"received");assert_eq!(result["items"][0]["version"],1);
    assert_eq!(raw(&f.app,"POST","/v0/inbox/read",token,json!({"consumer_id":c["consumer_id"],"cursor":page["next_cursor"]})).await.0,409);
   });

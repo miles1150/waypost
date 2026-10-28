@@ -101,43 +101,52 @@ def run(args, owner_secret):
             'actor_id': actor, 'view': 'inbox', 'filter': {}})['consumer_id']
         return actor, consumer
 
-    def token(label, actor, consumer, scopes, grants):
+    def token(label, actor, consumer):
         value = control.request('POST', root + '/tokens', {'request_id': prefix + label,
-            'actor_id': actor, 'consumer_id': consumer, 'scopes': scopes, 'resource_grants': grants})
+            'actor_id': actor, 'consumer_id': consumer})
         tokens.append(value['token_id'])
         return value, Client(args.url, value['token'])
 
     try:
         target_actor, target_consumer = assistant('target')
         source_actor, source_consumer = assistant('source')
-        target_token, target = token('target-token', target_actor, target_consumer, ['message.send'], {})
-        _, source = token('source-token', source_actor, source_consumer, ['message.send'],
-                          {'recipient_ids': [target_actor]})
-        permission_path = root + '/tokens/' + target_token['token_id'] + '/permissions'
-        detail = control.request('GET', permission_path)
+        target_token, target = token('target-token', target_actor, target_consumer)
+        _, source = token('source-token', source_actor, source_consumer)
+        routing_path = root + '/tokens/' + target_token['token_id'] + '/routing'
+        detail = control.request('GET', routing_path)
         before_identity = target.request('GET', '/v0/describe')
-        target.denied('POST', '/v0/inbox/read', {'consumer_id': target_consumer}, 'FORBIDDEN')
-        target.denied('PUT', permission_path, {}, 'UNAUTHENTICATED')
-        checks.append('read and self-escalation denied before owner edit')
+        check(before_identity.get('access_model') == 'space_membership',
+              'server does not advertise space membership')
+        check(not any(k in before_identity for k in ('scopes', 'resource_grants', 'allowed_recipient_ids')),
+              'server still advertises connection grants')
+        target.denied('PUT', routing_path, {}, 'UNAUTHENTICATED')
+        target.denied('POST', '/v0/inbox/read', {'consumer_id': source_consumer}, 'NOT_FOUND')
+        checks.append('membership advertised; connection cannot manage routing or use another Consumer')
         message = source.request('POST', '/v0/messages', {'request_id': prefix + '-message',
             'recipient_ids': [target_actor], 'kind': 'info', 'subject': 'Synthetic acceptance',
             'body': {'text': 'Untrusted test text must not enter the queue notification.'}})
-        edit = {'request_id': prefix + '-grant', 'expected_authority_version': detail['authority_version'],
-            'scopes': ['message.send', 'message.read'], 'resource_grants': detail['resource_grants'],
-            'default_recipient_id': detail['default_recipient_id']}
-        changed = control.request('PUT', permission_path, edit)
+        page = target.request('POST', '/v0/inbox/read', {'consumer_id': target_consumer})
+        check(any(i['resource_id'] == message['message_id'] for i in page['items']),
+              'same-space message missing without grants')
+        check(target.request('GET', '/v0/messages/' + message['message_id'])['message_id'] == message['message_id'],
+              'message unreadable without grants')
+        edit = {'request_id': prefix + '-routing', 'expected_authority_version': detail['authority_version'],
+            'default_recipient_id': source_actor}
+        changed = control.request('PUT', routing_path, edit)
         after_identity = target.request('GET', '/v0/describe')
         check(all(before_identity[k] == after_identity[k] for k in ('space_id', 'actor_id', 'consumer_id')),
-              'identity changed after permission edit')
+              'identity changed after routing edit')
         check(changed['authority_version'] == detail['authority_version'] + 1, 'version did not increment')
-        page = target.request('POST', '/v0/inbox/read', {'consumer_id': target_consumer})
-        check(any(i['resource_id'] == message['message_id'] for i in page['items']), 'history missing after grant')
-        replay = control.request('PUT', permission_path, edit)
+        replay = control.request('PUT', routing_path, edit)
         check(replay['replayed'] and replay['authority_version'] == changed['authority_version'], 'replay changed version')
-        stale = dict(edit, request_id=prefix + '-stale')
-        control.denied('PUT', permission_path, stale, 'REVISION_CONFLICT')
-        control.denied('PUT', permission_path, dict(edit, scopes=['message.send']), 'IDEMPOTENCY_CONFLICT')
-        checks.append('same bearer gains history; identity stable; replay and CAS verified')
+        control.denied('PUT', routing_path, dict(edit, request_id=prefix + '-stale'), 'REVISION_CONFLICT')
+        control.denied('PUT', routing_path, dict(edit, default_recipient_id=None), 'IDEMPOTENCY_CONFLICT')
+        reply = target.request('POST', '/v0/messages', {'request_id': prefix + '-reverse',
+            'kind': 'info', 'subject': 'Reverse synthetic acceptance', 'body': {'text': 'No side effects.'}})
+        source_page = source.request('POST', '/v0/inbox/read', {'consumer_id': source_consumer})
+        check(any(i['resource_id'] == reply['message_id'] for i in source_page['items']),
+              'default routing did not deliver reverse message')
+        checks.append('same-space bidirectional send/read without grants; default routing, replay and CAS verified')
         check(target.mcp('waypost_describe', {})['actor_id'] == target_actor, 'MCP identity mismatch')
         check(any(i['resource_id'] == message['message_id'] for i in target.mcp('waypost_inbox',
             {'consumer_id': target_consumer})['items']), 'MCP inbox missing message')
@@ -176,21 +185,19 @@ def run(args, owner_secret):
                 empty = target.request('POST', '/v0/inbox/read',
                     {'consumer_id': target_consumer, 'cursor': page['next_cursor']})
                 check(empty['items'] == [], 'bridge unexpectedly published visible feed items')
-                # Force a legitimate reading-view change without changing message visibility.
-                detail = control.request('GET', permission_path)
-                control.request('PUT', permission_path, dict(edit, request_id=prefix + '-view',
-                    expected_authority_version=detail['authority_version'],
-                    scopes=['message.send', 'message.read', 'memory.read']))
+                # Routing changes must not reset visibility or duplicate an accepted notification.
+                detail = control.request('GET', routing_path)
+                control.request('PUT', routing_path, dict(edit, request_id=prefix + '-route-reset',
+                    expected_authority_version=detail['authority_version'], default_recipient_id=None))
                 once()
-                check(counter.read_text() == '1', 'cursor recovery duplicated notification')
-                checks.append('real bridge binary: simulated queue, restart dedup, empty feed, cursor reset dedup')
+                check(counter.read_text() == '1', 'routing change duplicated notification')
+                checks.append('real bridge binary: simulated queue, restart dedup, empty feed, routing-change dedup')
                 result['empty_poll_evidence'] = 'no new visible feed items or queue calls; D1 writes need external metrics'
 
-        detail = control.request('GET', permission_path)
-        control.request('PUT', permission_path, dict(edit, request_id=prefix + '-remove',
-            expected_authority_version=detail['authority_version'], scopes=['message.send']))
-        target.denied('POST', '/v0/inbox/read', {'consumer_id': target_consumer}, 'FORBIDDEN')
-        checks.append('read permission removal takes effect on original bearer')
+        control.request('DELETE', root + '/tokens/' + target_token['token_id'])
+        target.denied('POST', '/v0/inbox/read', {'consumer_id': target_consumer}, 'UNAUTHENTICATED')
+        target.denied('GET', '/v0/messages/' + message['message_id'], None, 'UNAUTHENTICATED')
+        checks.append('revocation stops original bearer reads')
         result['result'] = 'passed'
     finally:
         for tid in tokens:

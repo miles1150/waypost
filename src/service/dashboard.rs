@@ -385,7 +385,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                 "tokens",
                 "token_id",
                 "created_at",
-                "token_id,actor_id,consumer_id,authority_version,default_recipient_id,expires_at,revoked_at,created_at,(SELECT json_group_array(scope) FROM token_scopes ts WHERE ts.token_id=tokens.token_id) AS scopes_json",
+                "token_id,actor_id,consumer_id,authority_version,default_recipient_id,expires_at,revoked_at,created_at",
                 "actor_id",
             ),
             "blobs" => (
@@ -464,15 +464,6 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                 if let Some(o) = v.as_object_mut() {
                     o.remove("sort_at");
                     o.remove("sort_id");
-                }
-                if kind == "tokens" {
-                    v["scopes"] = crate::json::parse(
-                        text(r, "scopes_json")?.as_bytes(),
-                        self.limits.max_json_bytes,
-                    )?;
-                    v.as_object_mut()
-                        .ok_or_else(Error::storage)?
-                        .remove("scopes_json");
                 }
                 if kind == "messages" || kind == "inbox" {
                     v["subject"] = json!(self.open_field(

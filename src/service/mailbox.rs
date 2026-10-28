@@ -194,7 +194,6 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         ))
     }
     pub(crate) async fn send(&self, p: &Principal, value: Value) -> Result<Value> {
-        p.require("message.send")?;
         let mut input: Send = crate::json::decode(value)?;
         input.validate()?;
         if input.attachment_ids.len() > self.limits.max_message_attachments {
@@ -218,21 +217,13 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         };
         recipients.sort();
         input.recipient_ids = Some(recipients.clone());
-        let allowed = if p.grants.recipient_ids.is_empty() {
-            vec![p.default_actor_id.clone()]
-        } else {
-            p.grants.recipient_ids.clone()
-        };
-        if recipients.iter().any(|id| !allowed.contains(id)) {
-            return Err(Error::forbidden());
-        }
         let mut new_thread = input.thread_id.is_none() && input.in_reply_to.is_none();
         if let Some(original) = &input.in_reply_to {
             if let Some(row) = previous
                 .as_ref()
                 .filter(|r| matches!(text(r, "state").as_deref(), Ok("committed" | "failed")))
             {
-                // Recover the original normalized thread before revalidating mutable reply-read grants.
+                // Recover the original normalized thread for an already settled request.
                 if input.thread_id.is_none() {
                     input.thread_id = Some(text(row, "thread_id")?);
                 }
@@ -460,14 +451,11 @@ impl<D: Database, O: ObjectStore> App<D, O> {
     }
     pub(crate) async fn message(&self, p: &Principal, id: &str) -> Result<Value> {
         check_id(id)?;
-        if !p.has("message.read") && !p.has("space.observe") {
-            return Err(Error::forbidden());
-        }
         let (authority, auth_args) = self.authority_guard(p);
         let mut args = vec![
             p.space_id.clone().into(),
             id.into(),
-            p.has("space.observe").into(),
+            p.owner_authority.is_some().into(),
             p.actor_id.clone().into(),
             p.actor_id.clone().into(),
         ];
@@ -497,48 +485,41 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         self.current(p).await?;
         Ok(value)
     }
-    // Only effective read visibility belongs in a feed cursor. Sending grants and
-    // receipt permissions do not change what a consumer can discover.
-    pub(crate) fn feed_grant_fingerprint(&self, p: &Principal) -> Result<String> {
-        let observe = p.view == "space_log" && p.has("space.observe");
-        let memory = p.has("memory.read");
+    // A space member's inbox visibility no longer depends on connection grants.
+    pub(crate) fn feed_visibility_fingerprint(&self, p: &Principal) -> Result<String> {
         fingerprint(
-            &json!({"view":p.view,"observe":observe,"messages":observe || p.has("message.read"),"memory":memory,"collections":if memory {p.grants.memory_read_collection_ids.clone()} else {vec![]}}),
+            &json!({"view":p.view,"observe":p.view == "space_log" && p.owner_authority.is_some(),"space_shared_memory":true}),
         )
     }
     pub(crate) fn feed_cursor(&self, p: &Principal, position: u64) -> Result<String> {
         self.sign_cursor(&format!(
-            "f3|{}|{}|{}|{}|{}|{}|{}",
+            "f4|{}|{}|{}|{}|{}|{}|{}",
             p.space_id,
             p.actor_id,
             p.consumer_id,
             p.view_revision,
             p.filter_fingerprint,
-            self.feed_grant_fingerprint(p)?,
+            self.feed_visibility_fingerprint(p)?,
             position
         ))
     }
     pub(crate) fn feed_position(&self, p: &Principal, cursor: &str) -> Result<u64> {
         let payload = self.verify_cursor(cursor)?;
         let fields = payload.split('|').collect::<Vec<_>>();
-        if fields.len() != 8 || !matches!(fields[0], "f2" | "f3") {
+        if fields.len() != 8 || !matches!(fields[0], "f2" | "f3" | "f4") {
             return Err(Error::new("INVALID_CURSOR", "Invalid cursor."));
         }
-        if fields[1] != p.space_id
+        if fields[0] != "f4"
+            || fields[1] != p.space_id
             || fields[2] != p.actor_id
             || fields[3] != p.consumer_id
             || fields[4] != p.view_revision.to_string()
             || fields[5] != p.filter_fingerprint
-            || fields[6]
-                != if fields[0] == "f2" {
-                    p.grant_fingerprint.clone()
-                } else {
-                    self.feed_grant_fingerprint(p)?
-                }
+            || fields[6] != self.feed_visibility_fingerprint(p)?
         {
             return Err(Error::new(
                 "CURSOR_SCOPE_CHANGED",
-                "Cursor belongs to another view or grant scope.",
+                "Cursor belongs to another inbox view or visibility version.",
             ));
         }
         let position = fields[7]

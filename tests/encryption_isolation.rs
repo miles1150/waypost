@@ -597,7 +597,7 @@ async fn another_users_ciphertext_cannot_be_read_or_relocated_into_the_current_s
         json!({"request_id":"another","display_name":"Another user"}),
     )
     .await;
-    let token=call(&f.app,"POST",&format!("/admin/v0/spaces/{}/tokens",other["space_id"].as_str().unwrap()),ADMIN,json!({"request_id":"another-token","actor_id":other["default_actor_id"],"consumer_id":other["default_consumer_id"],"scopes":["message.send","message.read"],"resource_grants":{}})).await;
+    let token=call(&f.app,"POST",&format!("/admin/v0/spaces/{}/tokens",other["space_id"].as_str().unwrap()),ADMIN,json!({"request_id":"another-token","actor_id":other["default_actor_id"],"consumer_id":other["default_consumer_id"]})).await;
     let other_token = token["token"].as_str().unwrap();
     let sent=call(&f.app,"POST","/v0/messages",other_token,json!({"request_id":"another-message","kind":"info","subject":"Another","body":{"text":"Owner two content"}})).await;
     let other_path = format!("/v0/messages/{}", sent["message_id"].as_str().unwrap());

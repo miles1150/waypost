@@ -11,7 +11,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         &self,
         request: &Request,
         sid: &str,
-        cid: Option<&str>,
+        _cid: Option<&str>,
     ) -> Result<Principal> {
         check_id(sid)?;
         if request
@@ -43,7 +43,6 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         let rows = self.db.query(Statement::new("SELECT s.default_actor_id,s.default_consumer_id,a.authority_version,c.view_revision FROM spaces s JOIN actors a ON a.space_id=s.space_id AND a.actor_id=s.default_actor_id JOIN consumers c ON c.space_id=s.space_id AND c.consumer_id=s.default_consumer_id WHERE s.space_id=? AND a.disabled=0 AND c.disabled=0",vec![sid.into()])).await?;
         let row = rows.first().ok_or_else(Error::not_found)?;
         let aid = text(row, "default_actor_id")?;
-        let collections = cid.map(|c| vec![c.to_string()]).unwrap_or_default();
         let p = Principal {
             owner_authority: Some(authority),
             space_id: sid.into(),
@@ -56,18 +55,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             default_actor_id: aid.clone(),
             default_recipient_id: aid,
             view: "inbox".into(),
-            scopes: vec![
-                "memory.read".into(),
-                "memory.write".into(),
-                "blob.write".into(),
-            ],
-            grants: ResourceGrants {
-                memory_read_collection_ids: collections.clone(),
-                memory_write_collection_ids: collections,
-                ..Default::default()
-            },
             filter: FeedFilter::default(),
-            grant_fingerprint: fingerprint(&json!({"dashboard_owner":sid,"collection":cid}))?,
             filter_fingerprint: String::new(),
         };
         self.current(&p).await?;

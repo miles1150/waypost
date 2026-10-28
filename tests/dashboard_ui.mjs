@@ -133,7 +133,7 @@ test('a simultaneous logout prevents an invitation response from displaying its 
   } finally {dom.window.close();}
 });
 
-test('permission management opens and includes later collection pages with a 20-item deployment limit', async () => {
+test('connection management does not load permission resources and respects deployment page size', async () => {
   const dom = new JSDOM(readFileSync(new URL('../dashboard/index.html', import.meta.url),'utf8'),{url:'https://service.example/dashboard',runScripts:'outside-only'});
   const {window:w}=dom;const d=w.document;const requests=[];
   w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
@@ -160,8 +160,8 @@ test('permission management opens and includes later collection pages with a 20-
     d.querySelector('[data-tab=agents]').click();await wait(()=>d.querySelector('.agent'));
     d.querySelector('[data-action=manage-connections]').click();
     await wait(()=>d.querySelector('.connection-form'));
-    assert(d.querySelector('#detail-body').textContent.includes('Later page'));
-    assert.equal(requests.filter(r=>r.body.kind==='collections').length,2);
+    assert.equal(requests.filter(r=>r.body.kind==='collections').length,0);
+    assert.equal(d.querySelector('[data-action=edit-permissions]'),null);
     assert(requests.filter(r=>r.path.endsWith('/inspect')).every(r=>r.body.limit<=20));
     assert.equal(d.querySelector('#detail-error').textContent,'');
   } finally {dom.window.close();}

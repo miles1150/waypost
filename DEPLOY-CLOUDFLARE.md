@@ -126,7 +126,7 @@ npx wrangler@4.111.0 deploy --dry-run --config wrangler.production.toml
 npx wrangler@4.111.0 deploy --config wrangler.production.toml --secrets-file .env.production
 ```
 
-Migrations are `migrations/0001_identity_mailbox.sql` through `migrations/0010_query_indexes.sql`. Apply them to the production database before serving traffic. Do not point the production config at a development database. `/ready` reports `schema_revision` 10 only after `0010_query_indexes.sql` is applied.
+For a new empty deployment, migrations are `migrations/0001_identity_mailbox.sql` through `migrations/0012_space_membership.sql`. Apply them before serving traffic. For an existing deployment, follow the maintenance procedure below. Do not point the production config at a development database. `/ready` must report `schema_revision` 12 after all migrations are applied.
 
 After deploy:
 
@@ -141,7 +141,15 @@ python3 scripts/verify_deployment.py \
 
 Copy the template's custom-domain route, `workers_dev = false`, `preview_urls = false`, `PUBLIC_ORIGIN`, `[observability.logs]`, `[assets]`, and build command into the gitignored `wrangler.production.toml`. Keep that file's real `account_id`, `database_id`, bucket name, and rate-limit namespace ids.
 
-Apply migration `0010_query_indexes.sql` before the Worker that expects ten migrations, then redeploy. Omit `--secrets-file` unless the secrets are rotating.
+### Upgrade from schema 11 to the Space membership model
+
+Migration `0012` drops four legacy connection grant tables. **Do not apply it while the old Worker serves traffic.** The old Worker queries those tables during authentication and cannot run on schema 12. A Worker-only rollback is not supported after this migration.
+
+Before execution, export a restorable D1 backup and record the deployed Worker version; preserve R2 data and the existing encryption keys. Verify the backup in an isolated database. Pause bridge/host consumers and use a maintenance window that blocks production API traffic and writes. Under that maintenance boundary, apply migration 0012, deploy the matching new Worker, then validate authenticated identity, cross-Space rejection, revoked credentials, messaging and shared materials before reopening traffic. If validation fails, keep traffic stopped and restore the pre-upgrade D1 snapshot together with the matching old Worker; do not restore over new user writes.
+
+This migration keeps credentials, identity, expiry, revocation, default routes, messages, receipts and historical permission audits. Existing valid connections immediately receive the new Space member behavior, including access to shared historical materials and sealed attachments. Old permission settings no longer apply. Hosts must refresh describe (`access_model=space_membership`), handle `CURSOR_SCOPE_CHANGED` by rescanning with deduplication, and update clients that send legacy scopes/grants on token creation. The bridge state directory must be preserved.
+
+The following commands are only the migration/deployment portion **inside the established maintenance window**, not an unattended upgrade script. Omit `--secrets-file` unless secrets are rotating.
 
 ```bash
 npx wrangler@4.111.0 d1 migrations apply waypost-production --remote --config wrangler.production.toml
@@ -151,6 +159,6 @@ curl --fail --silent "https://waypost.miles1150.top/health"
 curl --fail --silent --header "Authorization: Bearer <admin secret>" "https://waypost.miles1150.top/ready"
 ```
 
-`schema_revision` must be 10. Then open `https://waypost.miles1150.top/` and `https://waypost.miles1150.top/dashboard/`.
+`schema_revision` must be 12. Then open `https://waypost.miles1150.top/` and `https://waypost.miles1150.top/dashboard/`.
 
 Store the admin secret and the keyring outside the data backup. Losing the keyring makes existing ciphertext unreadable. Redeploying the Worker keeps D1 and R2 data.
