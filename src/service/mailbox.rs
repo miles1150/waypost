@@ -497,22 +497,31 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         self.current(p).await?;
         Ok(value)
     }
+    // Only effective read visibility belongs in a feed cursor. Sending grants and
+    // receipt permissions do not change what a consumer can discover.
+    pub(crate) fn feed_grant_fingerprint(&self, p: &Principal) -> Result<String> {
+        let observe = p.view == "space_log" && p.has("space.observe");
+        let memory = p.has("memory.read");
+        fingerprint(
+            &json!({"view":p.view,"observe":observe,"messages":observe || p.has("message.read"),"memory":memory,"collections":if memory {p.grants.memory_read_collection_ids.clone()} else {vec![]}}),
+        )
+    }
     pub(crate) fn feed_cursor(&self, p: &Principal, position: u64) -> Result<String> {
         self.sign_cursor(&format!(
-            "f2|{}|{}|{}|{}|{}|{}|{}",
+            "f3|{}|{}|{}|{}|{}|{}|{}",
             p.space_id,
             p.actor_id,
             p.consumer_id,
             p.view_revision,
             p.filter_fingerprint,
-            p.grant_fingerprint,
+            self.feed_grant_fingerprint(p)?,
             position
         ))
     }
     pub(crate) fn feed_position(&self, p: &Principal, cursor: &str) -> Result<u64> {
         let payload = self.verify_cursor(cursor)?;
         let fields = payload.split('|').collect::<Vec<_>>();
-        if fields.len() != 8 || fields[0] != "f2" {
+        if fields.len() != 8 || !matches!(fields[0], "f2" | "f3") {
             return Err(Error::new("INVALID_CURSOR", "Invalid cursor."));
         }
         if fields[1] != p.space_id
@@ -520,7 +529,12 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             || fields[3] != p.consumer_id
             || fields[4] != p.view_revision.to_string()
             || fields[5] != p.filter_fingerprint
-            || fields[6] != p.grant_fingerprint
+            || fields[6]
+                != if fields[0] == "f2" {
+                    p.grant_fingerprint.clone()
+                } else {
+                    self.feed_grant_fingerprint(p)?
+                }
         {
             return Err(Error::new(
                 "CURSOR_SCOPE_CHANGED",

@@ -1,0 +1,14 @@
+[Unit]
+Description=Waypost Codex bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/waypost-bridge --config %h/.config/waypost-bridge/config.json run
+Restart=on-failure
+RestartSec=10
+UMask=0077
+
+[Install]
+WantedBy=default.target

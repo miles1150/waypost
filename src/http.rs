@@ -173,33 +173,6 @@ fn templated_path(path: &str) -> String {
     format!("/{templated}")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::route_label;
-
-    #[test]
-    fn route_label_keeps_patterns_and_drops_ids() {
-        assert_eq!(route_label("GET", "/health"), "GET /health");
-        assert_eq!(
-            route_label("GET", "/dashboard/app.js"),
-            "GET /dashboard/app.js"
-        );
-        assert_eq!(
-            route_label("GET", "/v0/messages/msg_123"),
-            "GET /v0/messages/:id"
-        );
-        assert_eq!(
-            route_label("POST", "/admin/v0/spaces/space_1/memory/col_2/read"),
-            "POST /admin/v0/spaces/:id/memory/:id/read"
-        );
-        let hidden = route_label("GET", "/v0/blobs/secret-token-value");
-        assert_eq!(hidden, "GET /v0/blobs/:id");
-        assert!(!hidden.contains("secret"));
-        assert_eq!(route_label("TRACE", "/health"), "UNKNOWN /health");
-        assert_eq!(route_label("GET", "/not-a-route"), "GET /:id");
-    }
-}
-
 pub struct Request {
     pub method: String,
     pub path: String,
@@ -238,5 +211,32 @@ impl Response {
             ]),
             body: serde_json::to_vec(&value).expect("JSON value serializes"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::route_label;
+
+    #[test]
+    fn route_label_keeps_patterns_and_drops_ids() {
+        assert_eq!(route_label("GET", "/health"), "GET /health");
+        assert_eq!(
+            route_label("GET", "/dashboard/app.js"),
+            "GET /dashboard/app.js"
+        );
+        assert_eq!(
+            route_label("GET", "/v0/messages/msg_123"),
+            "GET /v0/messages/:id"
+        );
+        assert_eq!(
+            route_label("POST", "/admin/v0/spaces/space_1/memory/col_2/read"),
+            "POST /admin/v0/spaces/:id/memory/:id/read"
+        );
+        let hidden = route_label("GET", "/v0/blobs/secret-token-value");
+        assert_eq!(hidden, "GET /v0/blobs/:id");
+        assert!(!hidden.contains("secret"));
+        assert_eq!(route_label("TRACE", "/health"), "UNKNOWN /health");
+        assert_eq!(route_label("GET", "/not-a-route"), "GET /:id");
     }
 }

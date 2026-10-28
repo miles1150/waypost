@@ -134,3 +134,35 @@ PR #14（`f5415ba`）已合并自助接入状态、资料编辑、固定版本 Z
 另新增四项 DOM 回归，先复现保存期间仍可输入导致丢字的问题，再使编辑框在上传准备和版本发布期间保持只读。保存成功、存储错误、CAS 冲突，以及保存期间返回后继续修改均覆盖；迟到响应不会覆盖新打开的草稿，失败后恢复编辑。完整 Dashboard DOM 组共 14 项通过。指南同步最新内容比较、返回列表恢复草稿和明确核对后变更新基线的操作。
 
 本节依据合成数据的本机记录与新增回归，没有读取生产用户数据、执行生产备份或复验上一节的生产恢复记录。本机恢复结果不代表停写一致的完整生产灾备演练；生产可用性、容量、密码学审计与第三方模型协作仍按各自边界验收。
+
+
+## 连接权限编辑与本地桥（2026-10-28）
+
+设计与独立审查见 [方案](design/0006-local-bridge-and-connection-permissions.md) 和 [评审记录](reviews/2026-10-28-bridge-permissions-design.md)。由独立子代理审查，后端和 Dashboard 子代理及 Terra 桥接实现，主代理在 cloud env 集成、构建、部署和验收。
+
+### 实际发布
+
+生产入口 `https://waypost.miles1150.top`，Worker `waypost-production`。保存生产 D1 导出后应用兼容迁移 `0011_token_permissions.sql`，保留原 D1/R2、限速绑定与三项生产 secrets。最终 Worker Version 为 `b7e041a7-28f5-40e0-b47c-c368f54180b0`，Deployment 为 `c5638ef2-6945-4e52-9c37-b78fde74b3b6`，100% 流量。原版本 `91925311-7b67-4226-8898-1a7513baa469` 保留用于回滚。
+
+首次发布 `7697b4ad-2688-4ad8-b24b-d3eb73167492` 后，追加审查发现所有者授权需在提交事务内再次校验，立即回退旧版；补上精确凭据/session 校验、撤销/轮换/logout 与真正并发 CAS 测试并独立复核后，才发布最终版本。审计表为添加式迁移，回退代码没有删除它。
+
+### 检查与验收证据
+
+- 全部 native Rust 测试通过；最终权限补充测试包括 4 个模块内测试、4 个接口测试。
+- native 与 wasm strict Clippy、格式和 diff 检查通过；最终 owner-fence 变更完成 native Clippy 和实际 wasm release 构建。
+- 18 项 Dashboard DOM 测试、11 项 Python 测试通过。
+- bridge 的 9 项故障/权限/去重测试与 strict Clippy 通过；构建 Linux x86-64 release 二进制。
+- Cloudflare dry-run、实际版本上传通过，最终 Worker 启动时间报告 2 ms；这不是请求 CPU 压测。
+- 最终线上 Dashboard 与 HTML 中引用的四个 fingerprinted JS/CSS 资源全部 HTTP 200。
+- cloud env 使用真实 HTTPS HTTP/MCP 和 D1，在独立合成 Space 执行 `scripts/verify_bridge_permissions.py`：同一 bearer 增减权限、历史读取、身份保留、自提权拒绝、CAS、相同请求重放、MCP describe/inbox 全通过。
+- 同一验收使用实际 release bridge 二进制与模拟 Codex CLI，确认仅一次通知、重启去重、空 feed、权限视图变化重扫不重复通知。
+- 修复 cloud env 实测发现的 TLS `UnknownIssuer`：bridge 改用系统 CA 根，支持 `SSL_CERT_FILE`/`SSL_CERT_DIR`，始终保留证书验证。随后两次真实 HTTPS 空轮询以及完整集成验收通过。
+- 完整验收曾遇到一次网络 URLError，后续完整重跑通过；不将该失败计作通过。
+
+合成测试通过独立 owner 夹具初始化，不读取或更改用户消息。脚本撤销自身创建的测试凭据、停用助手；最终清理覆盖整个指定合成 Space，包括所有测试 token、Consumer 与 owner 凭据。保留合成消息和审计用于追溯。部署临时 Cloudflare token 在发布完成后撤销。
+
+### 验收边界
+
+真实 Codex 官方 CLI 已存在于 cloud env，但没有指定可用的真实目标会话，因此不声称实际模型已被唤醒或完成任务。Linux 实际运行；macOS 安装模板/构建矩阵已提供，未在真实 macOS 或 hosted Actions 验收。独立官网指南仅更新源码，未发布其另外的托管站点。
+
+空轮询没有新 feed 项或队列调用，客户端路径只执行读操作；尚未以 Cloudflare D1 billing counters 单独量测零写入，也未进行大量不可见记录扫描或请求 CPU 压测。五设备每 30–60 秒轮询的预算属于设计估算。

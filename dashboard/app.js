@@ -207,6 +207,7 @@ function renderTable(items) {
         return;
       } else showDetail(sections[tab].title, item);
     }));
+    if (tab === 'tokens' && !item.revoked_at && (!item.expires_at || new Date(item.expires_at).getTime() > Date.now())) action.append(actionButton('edit-permissions', t('permission.edit'), () => editPermissions(item, spaceId)));
     if (tab === 'tokens' && !item.revoked_at) action.append(button(t('token.revoke'), async () => {await api(`/admin/v0/spaces/${sid}/tokens/${item.token_id}`, 'DELETE', {}); await load();}));
     row.append(action); table.append(row);
   }
@@ -320,6 +321,7 @@ async function manageConnections(actor, preset = null) {
     row.append(el('p', token.revoked_at ? t('token.revoked') : expired ? t('token.expired') : t('token.valid')), el('p', token.scopes.map(s => scopeNames[s] || s).join('；')), el('p', token.expires_at ? t('token.expiresAt', {date: date(token.expires_at)}) : t('token.forever')), el('code', token.token_id));
     const ownerId = spaces.find(s => s.space_id === spaceId)?.default_actor_id;
     row.append(el('p', `${t('recipientLabel')}: ${token.default_recipient_id && token.default_recipient_id !== ownerId ? actorName(token.default_recipient_id) : t('ownerRecipient')}`));
+    if (!token.revoked_at && !expired) row.append(actionButton('edit-permissions', t('permission.edit'), () => editPermissions(token, spaceId)));
     if (!token.revoked_at) row.append(button(t('token.revokeBtn'), async () => {if (!confirm(t('token.confirmRevoke'))) return; await api(root + `/tokens/${token.token_id}`, 'DELETE', {}); if (spaceId === sid) await manageConnections(actor);}));
     body.append(row);
   }
@@ -369,6 +371,91 @@ async function manageConnections(actor, preset = null) {
   });});
   body.append(form); openDetail(t('ob.connFor', {name: actor.display_name}), body);
 }
+async function editPermissions(token, spaceId) {
+  const generation = authEpoch, root = `/admin/v0/spaces/${spaceId}`, path = `${root}/tokens/${token.token_id}/permissions`;
+  const [initial, collections] = await Promise.all([api(path), inspectItems('collections', spaceId)]);
+  if (spaceId !== sid || generation !== authEpoch) return;
+  let current = initial, saving = false;
+  const form = el('form', undefined, 'connection-form'), review = el('div'), conflict = el('div');
+  form.dataset.permissionEditor = token.token_id;
+  const active = () => sid === spaceId && generation === authEpoch && form.isConnected && $('#detail').open;
+  const unavailable = value => value.revoked_at || (value.expires_at && new Date(value.expires_at).getTime() <= Date.now());
+  form.append(el('p', t('permission.note')), el('code', token.token_id), el('p', t('permission.history')));
+  if (unavailable(initial) || initial.editable === false) {openDetail(t('permission.title'), el('p', t('permission.inactive'))); return;}
+  const inputs = [], scopeInputs = [], grantInputs = {};
+  const scopeLabels = {...scopeNames, 'space.observe': t('permission.observe'), 'blob.reference': t('permission.reference'), 'event.subscribe': t('permission.subscribe')};
+  function checks(title, entries, selected, key) {
+    const field = el('fieldset'), list = el('div', undefined, 'checks'), result = [];
+    field.append(el('legend', title));
+    for (const [id, name] of entries) {
+      const label = el('label', name), input = el('input'); input.type = 'checkbox'; input.checked = selected.includes(id); input.dataset.permissionField = key; input.value = id;
+      input.addEventListener('change', () => review.replaceChildren());
+      label.prepend(input); list.append(label); inputs.push(input); result.push([id, input]);
+    }
+    field.append(list); form.append(field); return result;
+  }
+  scopeInputs.push(...checks(t('ob.allow'), [...new Set([...Object.keys(scopeLabels), ...initial.scopes])].map(id => [id, scopeLabels[id] || id]), initial.scopes, 'scopes'));
+  const grants = initial.resource_grants, owner = spaces.find(s => s.space_id === spaceId)?.default_actor_id;
+  const recipientIds = [...new Set([owner, ...actors.filter(a => !a.disabled).map(a => a.actor_id), ...grants.recipient_ids].filter(Boolean))];
+  grantInputs.recipient_ids = checks(t('ob.recipients'), recipientIds.map(id => [id, id === owner ? t('ownerRecipient') : actorName(id)]), grants.recipient_ids.length ? grants.recipient_ids : [owner], 'recipient_ids');
+  for (const [key, title] of [['memory_read_collection_ids', t('ob.read')], ['memory_write_collection_ids', t('ob.write')]]) {
+    const ids = [...new Set([...collections.map(c => c.collection_id), ...grants[key]])];
+    grantInputs[key] = checks(title, ids.map(id => [id, collections.find(c => c.collection_id === id)?.display_name || id]), grants[key], key);
+  }
+  form.append(el('p', t('ob.ownNote')));
+  const blobLabel = el('label', t('permission.blobs')), blobs = el('textarea'); blobs.rows = 3; blobs.value = grants.blob_reference_ids.join('\n'); blobs.dataset.permissionField = 'blob_reference_ids';
+  blobs.addEventListener('input', () => review.replaceChildren()); inputs.push(blobs); blobLabel.append(blobs); form.append(blobLabel);
+  function draft() {
+    const resource_grants = {};
+    for (const [key, values] of Object.entries(grantInputs)) resource_grants[key] = values.filter(([, input]) => input.checked).map(([id]) => id).sort();
+    if (!resource_grants.recipient_ids.length) throw new Error(t('permission.recipientRequired'));
+    if (resource_grants.recipient_ids.length === 1 && resource_grants.recipient_ids[0] === owner) resource_grants.recipient_ids = [];
+    resource_grants.blob_reference_ids = [...new Set(blobs.value.split(/[\s,]+/).filter(Boolean))].sort();
+    const scopes = scopeInputs.filter(([, input]) => input.checked).map(([id]) => id).sort();
+    return {scopes, resource_grants};
+  }
+  const normalized = value => ({scopes:[...value.scopes].sort(), resource_grants:Object.fromEntries(Object.keys(grants).map(key => [key, [...(value.resource_grants[key] || [])].sort()]))});
+  function describe(value) {
+    const list = el('ul');
+    list.append(el('li', value.scopes.map(s => scopeLabels[s] || s).join('; ') || t('permission.none')));
+    for (const [key, title] of [['recipient_ids', t('ob.recipients')], ['memory_read_collection_ids', t('ob.read')], ['memory_write_collection_ids', t('ob.write')], ['blob_reference_ids', t('permission.blobs')]]) {
+      const ids = value.resource_grants[key] || [];
+      list.append(el('li', `${title}: ${ids.length ? ids.map(id => key === 'recipient_ids' ? actorName(id) : collections.find(c => c.collection_id === id)?.display_name || id).join(', ') : key === 'recipient_ids' ? t('ownerRecipient') : t('permission.none')}`));
+    }
+    return list;
+  }
+  async function loadLatest() {
+    const latest = await api(path);
+    if (!active()) return;
+    review.replaceChildren(); conflict.replaceChildren(el('p', t('permission.conflict')), el('h3', t('permission.latest')), describe(latest));
+    if (unavailable(latest) || latest.editable === false) {current = latest; inputs.forEach(input => input.disabled = true); preview.disabled = true; conflict.append(el('p', t('permission.inactive'))); return;}
+    conflict.append(actionButton('permission-use-latest', t('permission.useLatest'), () => {current = latest; conflict.replaceChildren(el('p', t('permission.rebased'))); review.replaceChildren();}));
+  }
+  const preview = el('button', t('permission.review')); preview.type = 'submit'; preview.dataset.permissionReview = '';
+  form.append(preview, conflict, review);
+  form.addEventListener('submit', event => {event.preventDefault(); if (saving) return; busy(preview, async () => {
+    if (!active()) return;
+    const value = draft();
+    if (JSON.stringify(normalized(value)) === JSON.stringify(normalized(current))) {review.replaceChildren(el('p', t('permission.unchanged'))); return;}
+    const requestId = crypto.randomUUID();
+    const commit = actionButton('permission-save', t('permission.save'), async () => {
+      if (!active() || saving) return;
+      saving = true; inputs.forEach(input => input.disabled = true); preview.disabled = true;
+      try {
+        const result = await api(path, 'PUT', {request_id: requestId, expected_authority_version: current.authority_version, ...value, default_recipient_id: current.default_recipient_id ?? null});
+        if (!active()) return;
+        openDetail(t('permission.title'), el('p', t('permission.saved')), el('code', token.token_id), describe(result));
+      } catch (error) {
+        if (!active()) return;
+        if (error.code === 'REVISION_CONFLICT') await loadLatest();
+        else throw error;
+      } finally {saving = false; if (active() && !unavailable(current) && current.editable !== false) {inputs.forEach(input => input.disabled = false); preview.disabled = false;}}
+    });
+    review.replaceChildren(el('h3', t('permission.before')), describe(current), el('h3', t('permission.after')), describe(value), commit);
+  });});
+  openDetail(t('permission.title'), form);
+}
+
 async function inspectItems(kind, spaceId) {
   const items = []; let next = null;
   do {const page = await api(`/admin/v0/spaces/${spaceId}/inspect`, 'POST', {kind, limit: pageSize, cursor: next}); items.push(...page.items); next = page.has_more ? page.next_cursor : null;} while (next);
