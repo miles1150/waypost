@@ -97,3 +97,5 @@ Cloudflare OpenAPI 的 `GET /accounts/{account_id}/r2/buckets/{bucket_name}/obje
 现改为独立 `cf_get_object`，使用 `quote(key, safe='/')`；分页 cursor 的查询参数编码不变。新增 `tests/test_cloudflare_restore_urls.py`，通过拦截实际 urllib Request、完全替代网络 I/O 验证多段/重复/首尾斜杠、空格、Unicode、保留字符、字面 `%2F` 与真实 `/` 的区别，以及 key 无法变成新主机、查询或 fragment。3 项隔离测试、脚本编译和差异格式检查通过。
 
 这是本地请求构造回归，不是 Cloudflare 对象下载或生产恢复验收。本轮只查询公共 API 规范，没有运行恢复脚本主流程、读取生产配置/凭据或访问生产资源。生产备份与恢复仍需按前述授权和演练要求另行执行。
+
+后续本地实现提供了默认关闭的[邀请制受控退役模式](0014-invitation-retirement.md)。它没有在生产启用，也没有删除历史表；生产替代闭环与恢复确认仍是切换前置条件。

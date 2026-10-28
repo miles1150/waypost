@@ -695,6 +695,259 @@ mod tests {
         app.handle(request(app, path, body)).await
     }
     #[tokio::test(flavor = "current_thread")]
+    async fn invitation_retirement_preserves_empty_and_populated_history_and_rollback() {
+        for populated in [false, true] {
+            let (_dir, app, _, sid) = fixture().await;
+            let operator = app.config.admin_secret.clone();
+            let space = app.admin_space(&sid).await.unwrap();
+            let token_response=app.handle(Request::json("POST",&format!("/admin/v0/spaces/{sid}/tokens"),&operator,json!({"request_id":"existing-client","actor_id":space["default_actor_id"],"consumer_id":space["default_consumer_id"]}))).await;
+            assert_eq!(token_response.status, 200);
+            let value: Value = serde_json::from_slice(&token_response.body).unwrap();
+            let token = value["data"]["token"].as_str().unwrap();
+            let sent=app.handle(Request::json("POST","/v0/messages",token,json!({"request_id":"old-history","kind":"info","subject":"Before retirement","body":{"text":"Synthetic preserved history"}}))).await;
+            assert_eq!(sent.status, 200);
+            let sent: Value = serde_json::from_slice(&sent.body).unwrap();
+            let message_id = sent["data"]["message_id"].as_str().unwrap();
+            let mut invite = None;
+            if populated {
+                let response = app
+                    .handle(Request::json(
+                        "POST",
+                        "/admin/access-request",
+                        "",
+                        json!({"request_id":"old-request","email":"synthetic@example.test"}),
+                    ))
+                    .await;
+                assert_eq!(response.status, 200);
+                let unclaimed = app
+                    .admin(
+                        &Request::json("POST", "/admin/v0/spaces", &operator, json!({})),
+                        json!({"request_id":"unclaimed","display_name":"Unclaimed"}),
+                    )
+                    .await
+                    .unwrap();
+                let invitation = app
+                    .handle(Request::json(
+                        "POST",
+                        &format!(
+                            "/admin/v0/spaces/{}/invitations",
+                            unclaimed["space_id"].as_str().unwrap()
+                        ),
+                        &operator,
+                        json!({"request_id":"old-invitation","access_request_id":"old-request"}),
+                    ))
+                    .await;
+                assert_eq!(invitation.status, 200);
+                let value: Value = serde_json::from_slice(&invitation.body).unwrap();
+                invite = Some(value["data"]["invite_token"].as_str().unwrap().to_owned());
+                for (id, state, expiry) in [
+                    ("expired", "pending", 1),
+                    ("revoked", "revoked", app.clock.now_ms() + 600000),
+                    ("redeemed", "redeemed", app.clock.now_ms() + 600000),
+                ] {
+                    app.db.batch(vec![Statement::new("INSERT INTO space_invitations(invitation_id,space_id,token_digest,owner_version,state,created_at,expires_at) VALUES(?,?,?,0,?,0,?)",vec![id.into(),unclaimed["space_id"].as_str().unwrap().into(),digest(&format!("wpi_{id}")),state.into(),expiry.into()])]).await.unwrap();
+                }
+            }
+            let login = app
+                .handle(Request::json(
+                    "POST",
+                    "/admin/session",
+                    "",
+                    json!({"admin_secret":OWNER}),
+                ))
+                .await;
+            assert_eq!(login.status, 200);
+            let owner_cookie = login.headers["set-cookie"]
+                .split(';')
+                .next()
+                .unwrap()
+                .to_owned();
+            let invitations = app
+                .db
+                .query(Statement::new(
+                    "SELECT * FROM space_invitations ORDER BY invitation_id",
+                    vec![],
+                ))
+                .await
+                .unwrap();
+            let requests = app
+                .db
+                .query(Statement::new(
+                    "SELECT * FROM access_requests ORDER BY request_id",
+                    vec![],
+                ))
+                .await
+                .unwrap();
+            let app = app.with_onboarding_mode("accounts").unwrap();
+            let mut existing_session = Request::json("GET", "/admin/session", "", json!({}));
+            existing_session.headers.remove("authorization");
+            existing_session
+                .headers
+                .insert("cookie".into(), owner_cookie.clone());
+            assert_eq!(app.handle(existing_session).await.status, 200);
+            for (method, path, body) in [
+                (
+                    "POST",
+                    "/admin/access-request".to_owned(),
+                    json!({"request_id":"new-request","email":"new@example.test"}),
+                ),
+                (
+                    "POST",
+                    "/admin/invitation".to_owned(),
+                    json!({"invite_token":invite.as_deref().unwrap_or("missing")}),
+                ),
+                ("POST", "/admin/v0/access-requests".to_owned(), json!({})),
+                (
+                    "POST",
+                    format!("/admin/v0/spaces/{sid}/invitations"),
+                    json!({"request_id":"new-invite"}),
+                ),
+                (
+                    "DELETE",
+                    format!("/admin/v0/spaces/{sid}/invitations/old"),
+                    json!({}),
+                ),
+                (
+                    "POST",
+                    format!("/admin/v0/spaces/{sid}/invitations/"),
+                    json!({"request_id":"slash-invite"}),
+                ),
+            ] {
+                for credential in [&operator[..], OWNER, ""] {
+                    assert_eq!(
+                        app.handle(Request::json(method, &path, credential, body.clone()))
+                            .await
+                            .status,
+                        410,
+                        "{path}"
+                    );
+                }
+                let mut owner_request = Request::json(method, &path, "", body);
+                owner_request.headers.remove("authorization");
+                owner_request
+                    .headers
+                    .insert("cookie".into(), owner_cookie.clone());
+                assert_eq!(app.handle(owner_request).await.status, 410, "{path}");
+            }
+            assert_eq!(
+                invitations,
+                app.db
+                    .query(Statement::new(
+                        "SELECT * FROM space_invitations ORDER BY invitation_id",
+                        vec![]
+                    ))
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(
+                requests,
+                app.db
+                    .query(Statement::new(
+                        "SELECT * FROM access_requests ORDER BY request_id",
+                        vec![]
+                    ))
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(
+                app.handle(Request::json("GET", "/v0/describe", token, json!({})))
+                    .await
+                    .status,
+                200
+            );
+            assert_eq!(
+                app.handle(Request::json(
+                    "GET",
+                    &format!("/v0/messages/{message_id}"),
+                    token,
+                    json!({})
+                ))
+                .await
+                .status,
+                200
+            );
+            assert_eq!(
+                action(
+                    &app,
+                    "/account/spaces/claim",
+                    json!({"space_id":sid,"owner_credential":OWNER})
+                )
+                .await
+                .status,
+                200
+            );
+            assert_eq!(
+                action(
+                    &app,
+                    "/account/spaces/recover",
+                    json!({"space_id":sid,"owner_credential":OWNER})
+                )
+                .await
+                .status,
+                200
+            );
+            let meta = app
+                .handle(Request::json("GET", "/onboarding", "", json!({})))
+                .await;
+            let meta: Value = serde_json::from_slice(&meta.body).unwrap();
+            assert_eq!(meta["data"]["invitations_enabled"], false);
+            assert_eq!(meta["data"]["accounts_enabled"], true);
+            assert_eq!(
+                app.handle(Request::json("GET", "/v0/describe", token, json!({})))
+                    .await
+                    .status,
+                200
+            );
+            let app = app.with_onboarding_mode("legacy").unwrap();
+            assert_eq!(
+                app.handle(Request::json(
+                    "POST",
+                    "/admin/v0/access-requests",
+                    &operator,
+                    json!({})
+                ))
+                .await
+                .status,
+                200
+            );
+            if let Some(invite) = invite {
+                for state in ["expired", "revoked", "redeemed"] {
+                    assert_eq!(
+                        app.handle(Request::json(
+                            "POST",
+                            "/admin/invitation",
+                            "",
+                            json!({"invite_token":format!("wpi_{state}")})
+                        ))
+                        .await
+                        .status,
+                        401
+                    );
+                }
+                assert_eq!(
+                    app.handle(Request::json(
+                        "POST",
+                        "/admin/invitation",
+                        "",
+                        json!({"invite_token":invite})
+                    ))
+                    .await
+                    .status,
+                    200
+                );
+            }
+        }
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn retirement_requires_explicit_mode_and_account_configuration() {
+        let (_dir, mut app, _, _) = fixture().await;
+        assert!(app.invitations_enabled);
+        app.oidc = None;
+        assert!(app.with_onboarding_mode("accounts").is_err());
+        let (_dir, app, _, _) = fixture().await;
+        assert!(app.with_onboarding_mode("unknown").is_err());
+    }
+    #[tokio::test(flavor = "current_thread")]
     async fn origin_validation_rejects_url_components_and_prefix_tricks() {
         for origin in [
             "https://example.test/path",

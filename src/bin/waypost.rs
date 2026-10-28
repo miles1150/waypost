@@ -149,6 +149,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         app
     };
+    let app = app.with_onboarding_mode(
+        &std::env::var("WAYPOST_ONBOARDING_MODE").unwrap_or_else(|_| "legacy".into()),
+    )?;
     let app = Rc::new(app);
     if command == "init" {
         println!(

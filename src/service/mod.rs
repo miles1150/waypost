@@ -95,6 +95,7 @@ pub struct App<D, O> {
     pub(crate) oidc: Option<accounts_oidc::OidcConfig>,
     pub(crate) account_signup_limit: usize,
     pub(crate) oauth: Option<oauth::OAuthConfig>,
+    pub(crate) invitations_enabled: bool,
     pub(crate) oidc_exchange: Option<Rc<dyn accounts_oidc::OidcCodeExchange>>,
 }
 // SQL execution is sealed inside this crate; callers use supported runtimes and domain HTTP/MCP operations.
@@ -108,6 +109,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             oidc: None,
             account_signup_limit: 0,
             oauth: None,
+            invitations_enabled: true,
             oidc_exchange: None,
             db,
             objects,
@@ -115,6 +117,25 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             clock: Rc::new(SystemClock),
             limits: Limits::default(),
         }
+    }
+    /// Retirement is opt-in and requires the replacement account path. Data is
+    /// retained so rollback can restore the legacy workflow without a down migration.
+    pub fn with_onboarding_mode(mut self, mode: &str) -> Result<Self> {
+        self.invitations_enabled = match mode {
+            "legacy" => true,
+            "accounts" if self.oidc.is_some() => false,
+            "accounts" => {
+                return Err(Error::invalid(
+                    "Account onboarding requires configured OIDC.",
+                ));
+            }
+            _ => {
+                return Err(Error::invalid(
+                    "Onboarding mode must be legacy or accounts.",
+                ));
+            }
+        };
+        Ok(self)
     }
     pub fn with_cursor_secret(mut self, secret: &str) -> Result<Self> {
         if secret.len() < 32 {
@@ -134,6 +155,31 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         self
     }
     pub async fn handle(&self, request: Request) -> Response {
+        if request.path == "/onboarding" && request.method == "GET" {
+            return Response::json(
+                200,
+                json!({"ok":true,"data":{
+                    "invitations_enabled":self.invitations_enabled,
+                    "accounts_enabled":self.oidc.is_some(),
+                    "account_url":if self.oidc.is_some() {Some("/account")} else {None}
+                }}),
+            );
+        }
+        let parts: Vec<_> = request.path.split('/').collect();
+        let invitation_route = matches!(
+            request.path.as_str(),
+            "/admin/access-request" | "/admin/invitation" | "/admin/v0/access-requests"
+        ) || (parts.len() >= 5
+            && parts[..4] == ["", "admin", "v0", "spaces"]
+            && parts.get(5) == Some(&"invitations"));
+        if !self.invitations_enabled && invitation_route {
+            return Response::json(
+                410,
+                json!({"ok":false,"error":{
+                    "code":"INVITATIONS_RETIRED","message":"Invitation onboarding is retired. Use account sign-in or existing space recovery.","details":{"account_url":"/account"}}
+                }),
+            );
+        }
         if request.path.starts_with("/oauth/") || request.path.starts_with("/.well-known/oauth-") {
             return self.oauth_handle(&request).await;
         }

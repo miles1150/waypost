@@ -15,6 +15,7 @@ test('a disabled primary assistant directs the owner to choose another instead o
   const dom=new JSDOM(readFileSync(new URL('../dashboard/index.html',import.meta.url),'utf8'),{url:'https://service.example/dashboard',runScripts:'outside-only'});
   const {window:w}=dom; const d=w.document;
   w.fetch=async(path,options={})=>{
+    if(path==='/onboarding')return {ok:true,status:200,json:async()=>({ok:true,data:{invitations_enabled:true,accounts_enabled:false,account_url:null}})};
     if (typeof path === 'string' && path.includes('/dashboard/locales/')) {
       const file = path.split('/').pop();
       return {ok:true,status:200,json:async()=>JSON.parse(readFileSync(new URL('../dashboard/locales/'+file,import.meta.url),'utf8'))};
@@ -42,6 +43,7 @@ test('viewing space sign-in explains the target and waits for an explicit reset'
   w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
   w.HTMLDialogElement.prototype.close=function(){this.open=false;this.dispatchEvent(new w.Event('close'));};
   w.fetch=async(path,options={})=>{
+    if(path==='/onboarding')return {ok:true,status:200,json:async()=>({ok:true,data:{invitations_enabled:true,accounts_enabled:false,account_url:null}})};
     if (typeof path === 'string' && path.includes('/dashboard/locales/')) {
       const file = path.split('/').pop();
       return {ok:true,status:200,json:async()=>JSON.parse(readFileSync(new URL('../dashboard/locales/'+file,import.meta.url),'utf8'))};
@@ -75,7 +77,7 @@ test('a redeemed personal credential remains visible when space loading fails', 
   const {window:w}=dom;
   w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
   w.HTMLDialogElement.prototype.close=function(){this.open=false;this.dispatchEvent(new w.Event('close'));};
-  w.fetch=async path=>path==='/admin/invitation'
+  w.fetch=async path=>path==='/onboarding'?{ok:true,status:200,json:async()=>({ok:true,data:{invitations_enabled:true,accounts_enabled:false,account_url:null}})}:path==='/admin/invitation'
     ?{ok:true,status:200,json:async()=>({ok:true,data:{credential:'wp_user_once',csrf_token:'test',operator:false}})}
     :{ok:false,status:503,json:async()=>({ok:false,error:{message:'Storage temporarily unavailable'}})};
   try {
@@ -99,6 +101,7 @@ test('a simultaneous logout prevents an invitation response from displaying its 
   w.HTMLDialogElement.prototype.close=function(){this.open=false;this.dispatchEvent(new w.Event('close'));};
   let resolveInvite, resolveLogout;
   w.fetch=async(path,options={})=>{
+    if(path==='/onboarding')return {ok:true,status:200,json:async()=>({ok:true,data:{invitations_enabled:true,accounts_enabled:false,account_url:null}})};
     if (typeof path === 'string' && path.includes('/dashboard/locales/')) {
       const file = path.split('/').pop();
       return {ok:true,status:200,json:async()=>JSON.parse(readFileSync(new URL('../dashboard/locales/'+file,import.meta.url),'utf8'))};
@@ -139,6 +142,7 @@ test('connection management does not load permission resources and respects depl
   w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
   w.HTMLDialogElement.prototype.close=function(){this.open=false;this.dispatchEvent(new w.Event('close'));};
   w.fetch=async (path,options={})=>{
+    if(path==='/onboarding')return {ok:true,status:200,json:async()=>({ok:true,data:{invitations_enabled:true,accounts_enabled:false,account_url:null}})};
     const body=options.body?JSON.parse(options.body):{};requests.push({path,body});
     let data;
     if(path.endsWith('/primary-assistant')) data={revision:0,primary_assistant:null};
@@ -166,3 +170,42 @@ test('connection management does not load permission resources and respects depl
     assert.equal(d.querySelector('#detail-error').textContent,'');
   } finally {dom.window.close();}
 });
+
+for (const mode of ['retired','unavailable']) for (const hash of ['#invite=private-old-link','#request-access']) {
+  test(`onboarding ${mode} strips ${hash.split('=')[0]} and blocks hidden controls and stale invitation work`,async()=>{
+    const dom=new JSDOM(readFileSync(new URL('../dashboard/index.html',import.meta.url),'utf8'),{url:'https://service.example/dashboard'+hash,runScripts:'outside-only'}),w=dom.window,d=w.document,calls=[];
+    Object.defineProperty(w,'crypto',{value:webcrypto});
+    w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
+    w.HTMLDialogElement.prototype.close=function(){this.open=false;};
+    w.sessionStorage.setItem('waypost-pending-creation',JSON.stringify({type:'invite',name:'stale',prefix:'old',sid:'space-one',revoke_invitation_id:'stale-invite'}));
+    assert.equal(d.querySelector('#request-access').hidden,true);
+    let release;
+    const metadata=new Promise(resolve=>{release=resolve;});
+    w.fetch=async(path,options={})=>{
+      if(path.includes('/dashboard/locales/'))return {ok:true,status:200,json:async()=>JSON.parse(readFileSync(new URL('../dashboard/locales/'+path.split('/').pop(),import.meta.url),'utf8'))};
+      calls.push(path);
+      if(path==='/onboarding'){await metadata;if(mode==='unavailable')throw new Error('offline');return {ok:true,status:200,json:async()=>({ok:true,data:{invitations_enabled:false,accounts_enabled:true,account_url:'/account'}})};}
+      const body=options.body?JSON.parse(options.body):{};
+      const data=path==='/admin/session'?{csrf_token:'test',operator:true}:path==='/admin/v0/registry'?{items:fixtures[body.kind]||[],has_more:false}:path.endsWith('/primary-assistant')?{revision:0,primary_assistant:null}:{items:[],has_more:false};
+      return {ok:true,status:200,json:async()=>({ok:true,data})};
+    };
+    try {
+      w.eval(readFileSync(new URL('../dashboard/i18n.js',import.meta.url),'utf8'));
+      w.eval(readFileSync(new URL('../dashboard/app.js',import.meta.url),'utf8'));
+      assert.equal(w.location.hash,'');
+      d.querySelector('#request-access').click();d.querySelector('#invite-user').click();
+      assert.deepEqual(calls,['/onboarding']);
+      release();await w.WaypostI18n.set('en');
+      await wait(()=>!d.querySelector('#app').hidden&&d.querySelector('#notice').textContent);
+      assert.equal(d.querySelector('#request-access').hidden,true);assert.equal(d.querySelector('#invite-user').hidden,true);assert.equal(d.querySelector('#access-requests-tab').hidden,true);
+      assert.equal(d.querySelector('#account-setup-app').hidden,mode!=='retired');
+      assert.equal(w.sessionStorage.getItem('waypost-pending-creation'),null);
+      d.querySelector('#request-access').click();d.querySelector('#invite-user').click();d.querySelector('#access-requests-tab').click();
+      await new Promise(resolve=>setTimeout(resolve,40));
+      assert(!calls.some(path=>/invitation|access-request/.test(path)));
+      assert(!calls.includes('/admin/v0/spaces'));
+      assert.equal(d.querySelector('#login-form input[type=password]').id,'secret');
+      assert(!d.querySelector('[data-i18n="login.fine"]').textContent.includes('invitation'));
+    }finally{release();w.close();}
+  });
+}

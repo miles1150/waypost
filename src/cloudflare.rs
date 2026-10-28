@@ -537,6 +537,14 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
     } else {
         app
     };
+    let onboarding = env
+        .var("WAYPOST_ONBOARDING_MODE")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|_| "legacy".into());
+    let app = match app.with_onboarding_mode(&onboarding) {
+        Ok(app) => app,
+        Err(_) => return log_and_error(&route_name, Error::internal("onboarding configuration")),
+    };
     let app = if let Ok(secret) = env.secret("WAYPOST_CURSOR_SECRET") {
         match app.with_cursor_secret(&secret.to_string()) {
             Ok(app) => app,
