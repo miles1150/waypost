@@ -64,6 +64,13 @@ def cf_get(account, token, path):
         return response.read(), dict(response.headers)
 
 
+def cf_get_object(account, token, bucket, key):
+    # R2 Get Object's object_key contract requires literal path separators;
+    # encode other reserved characters, including '%' in literal escape text.
+    encoded_key = urllib.parse.quote(key, safe='/')
+    return cf_get(account, token, f'/r2/buckets/{bucket}/objects/{encoded_key}')
+
+
 class Admin:
     """Minimal operator client mirroring dashboard/app.js login and inspect calls."""
 
@@ -202,8 +209,7 @@ def main():
             key = entry.get('key') or entry.get('name')
             if not key:
                 return fail('R2 listing entry without a key')
-            payload, headers = cf_get(
-                account, token, f'/r2/buckets/{bucket}/objects/{urllib.parse.quote(key, safe="")}')
+            payload, headers = cf_get_object(account, token, bucket, key)
             if len(payload) != int(entry.get('size', len(payload))):
                 return fail(f'R2 download size mismatch for entry {position}')
             target = object_dir / f'{position}.bin'

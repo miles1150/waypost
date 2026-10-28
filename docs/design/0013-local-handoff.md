@@ -89,3 +89,11 @@ client_id = "local-mcp-test"
 - 保留生产限流及管理边界。确认公开 client ID 耗尽全局请求上限的风险、token 元数据保留策略和低频个人使用的实际资源开销。
 - 通知 HTTPS 浏览器需重新登录；旧桥和 Bearer 兼容需用现有真实身份做独立、可回收的验收。继续保留邀请，不将本轮直接当作邀请退役或账号管理全功能上线。
 - 发布后核验部署版本、`/ready`、发现与 issuer、最小权限、撤销/解绑、旧桥收发，以及真实 IdP 与目标宿主；缺失部分必须保持未验收状态。
+
+## R2 恢复脚本编码修正（交接后补充）
+
+Cloudflare OpenAPI 的 `GET /accounts/{account_id}/r2/buckets/{bucket_name}/objects/{object_key}` 参数说明明确要求 key 中的斜杠原样传输，不得编码为 `%2F`，其他保留字符仍须编码。核对发现 `scripts/verify_cloudflare_restore.py` 下载对象时原先使用 `quote(key, safe='')`，判断属实。
+
+现改为独立 `cf_get_object`，使用 `quote(key, safe='/')`；分页 cursor 的查询参数编码不变。新增 `tests/test_cloudflare_restore_urls.py`，通过拦截实际 urllib Request、完全替代网络 I/O 验证多段/重复/首尾斜杠、空格、Unicode、保留字符、字面 `%2F` 与真实 `/` 的区别，以及 key 无法变成新主机、查询或 fragment。3 项隔离测试、脚本编译和差异格式检查通过。
+
+这是本地请求构造回归，不是 Cloudflare 对象下载或生产恢复验收。本轮只查询公共 API 规范，没有运行恢复脚本主流程、读取生产配置/凭据或访问生产资源。生产备份与恢复仍需按前述授权和演练要求另行执行。
