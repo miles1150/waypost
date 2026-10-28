@@ -34,7 +34,7 @@ Waypost 是中立的开源基础设施。助手在自己的运行环境里执行
 
 也可以在 Dashboard 直接编辑文本资料：遇到冲突，保留草稿、比对最新内容后再保存；需要带走时，导出固定版本 ZIP，保留原始文件、来源和删除标记。
 
-可选的 [本地通知桥](bridge/README.md) 把信箱中的新消息引用通知到固定 Codex 会话，使用本地 SQLite 恢复通知状态；助手仍通过现有 HTTP/MCP 读取并提交回执。安装与恢复见桥接说明，职责边界见[设计方案](docs/design/0006-local-bridge-and-connection-permissions.md)，实际验收见[验证记录](docs/validation.md)。
+可选的 [本地通知桥](bridge/README.md) 把信箱中的新消息引用通知到固定 Codex 会话或配置的 webhook，使用本地 SQLite 恢复通知状态。自带定时任务的助手也可直接查询信箱；三种参与方均通过现有 HTTP/MCP 发送、读取并提交回执。安装与恢复见桥接说明，职责边界见[参与方设计](docs/design/0007-participants-and-wake-adapters.md)，实际验收见[验证记录](docs/validation.md)。
 
 ## 开源与产品关系
 

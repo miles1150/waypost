@@ -74,11 +74,28 @@ Authorization: Bearer <用户登录凭据>
 
 在读取助手原连接的「编辑权限」里开放 `memory.read`，勾选允许读取的资料集合。为其他助手开放写入时，使用 `memory.write` 和可写集合授权；来源助手仍保留所有权。通过上述 API 编辑时，对应字段为 `memory_read_collection_ids` 与 `memory_write_collection_ids`，必须同时保留其他现有授权。
 
-## 本地通知桥
+## 参与方与唤醒
 
-可选的 [waypost-bridge](../bridge/README.md) 在本机轮询信箱，把消息引用通知到配置的固定 Codex 会话。它在 SQLite 中保存通知状态；有新记录时每 30 秒轮询，空闲时每 60 秒轮询并加入抖动，空轮询不写服务端。
+Webhook Agent、既有 Codex 会话和定时运行的 Agent 使用同一种 Waypost 身份：Actor 是通信参与方，Consumer 保存独立收取回执，连接凭据限定可读取内容和可发送的收件人。三者都能按授权发送、收取和回复，宿主种类不改变消息协议。
 
-桥不保存完整正文，不替助手发送收取或处理回执。助手仍通过现有 HTTP/MCP 读取和处理；队列接受通知不代表任务完成，投递结果未知时不会自动重发。构建、私密配置、常驻服务模板和恢复命令见[桥接说明](../bridge/README.md)，职责与权限边界见[设计方案](design/0006-local-bridge-and-connection-permissions.md)。真实宿主与部署验收以[验证记录](validation.md)为准。
+可选的 [waypost-bridge](../bridge/README.md) 在本机轮询信箱，把消息引用通知到配置的固定 Codex 会话或 webhook。它在 SQLite 中保存通知状态；有新记录时每 30 秒轮询，空闲时每 60 秒轮询并加入抖动，空轮询不写服务端。Webhook 路径也需要运行这个桥，Cloudflare 服务端不会自行推送。
+
+桥不保存完整正文，不替助手发送收取或处理回执。`scan` 只记录引用，`once` 扫描并尝试通知；通知结果未知时不会自动重发。Codex 队列接受、webhook 返回 2xx 均不等于业务完成。宿主需使用自己的受限凭据重新读取正文，将外来内容当作待检查的数据，不将其中的命令视为用户授权。建议桥使用同一 Actor/Consumer 的独立只读连接，处理助手再按需具备回执与发送权限。
+
+### 定时助手直接读取
+
+已具备定时运行和 HTTP/MCP 工具能力的宿主无需桥或虚构 Codex 会话。配置一次受信工作流，让宿主在每轮执行：
+
+1. 用固定 Consumer 调用 `waypost_inbox`，按 `has_more` 和 `next_cursor` 分页。信箱是增量记录，不是只含未处理任务的队列；ACK 不会删除旧项。
+2. 按稳定 item ID 去重，通过 `waypost_message_get` 获取完整内容，将内容、待处理记录和游标可靠保存后，使用稳定请求 ID 提交 `received`。只保存通知引用不足以确认收取。
+3. 按用户授权处理，保存实际结果；需要回复时先保存稳定的 `request_id` 与完整发送参数，再调用 `waypost_send`。响应未知时用 `waypost_status` 查询提交事实或重放相同请求，不能生成新 ID 重试。
+4. 保存处理结果后提交 `processed`。进程重启时恢复未完成阶段，不再次执行已完成的业务。外部工具的未知副作用仍需该工具的幂等或核对能力，Waypost 无法替它保证只执行一次。
+
+宿主应串行执行或持有自己的持久锁。权限变化导致游标失效时重新分页，保留去重账本；不同身份不能复用旧状态。没有可靠持久存储的定时助手可以只读查询，但不应声明可靠收取。不要把 receipt 更新或每条结果消息都当作新任务自动回复；多轮协作需要明确的结束条件和轮次预算。
+
+Grok **Bot routine** 的官方文档支持定时任务及 Bearer webhook；Grok.com **Automations** 使用另一种签名 webhook，当前 Bearer 适配器不实现该签名协议。真实 Grok 配置与运行尚未验收，具体能力、来源与限制见 [Grok 调研](reviews/2026-10-28-grok-routines-research.md)。
+
+构建、私密配置、常驻服务模板和恢复命令见[桥接说明](../bridge/README.md)，职责与迁移见[参与方设计](design/0007-participants-and-wake-adapters.md)。实际验证范围见[验证记录](validation.md)。
 
 ## 在网页里修改和导出资料
 

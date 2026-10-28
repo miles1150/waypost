@@ -166,3 +166,16 @@ PR #14（`f5415ba`）已合并自助接入状态、资料编辑、固定版本 Z
 真实 Codex 官方 CLI 已存在于 cloud env，但没有指定可用的真实目标会话，因此不声称实际模型已被唤醒或完成任务。Linux 实际运行；macOS 安装模板/构建矩阵已提供，未在真实 macOS 或 hosted Actions 验收。独立官网指南仅更新源码，未发布其另外的托管站点。
 
 空轮询没有新 feed 项或队列调用，客户端路径只执行读操作；尚未以 Cloudflare D1 billing counters 单独量测零写入，也未进行大量不可见记录扫描或请求 CPU 压测。五设备每 30–60 秒轮询的预算属于设计估算。
+
+
+## 通用参与方与唤醒适配器（2026-10-28，后续本地实现）
+
+本轮在 `5506799` 基础上继续原工作区，先完成 [0007 设计](design/0007-participants-and-wake-adapters.md) 和[独立审查](reviews/2026-10-28-participant-adapters-review.md)，再由 Terra 实现通用适配器，由另一子代理实现本地集成验收。未修改服务端协议、数据库迁移、生产部署、凭据或网络设置；未合并或推送这些后续改动。
+
+代码将公共 Config、扫描及通知账本与 `Codex` / `Webhook` 目标区分，Codex 进程与核对代码移入独立模块。Webhook 使用私密 URL/独立 Bearer 文件、引用 payload 和稳定 delivery_id；每次投递核对固定目标，公网 HTTPS 地址检查及 DNS 固定，禁止重定向，在无法保证固定目标的环境代理下发送前拒绝。只有显式 literal-loopback 测试配置允许本机 HTTP。旧平铺 Codex 配置与新版配置映射到原有八元绑定，不清空游标、accepted 或 unknown。`scan` 不投递；`status --items` 提供人工核对引用。桥不代发 received/processed。
+
+主代理复跑桥的 15 项 Rust 测试通过，最终格式检查、strict Clippy、debug 构建、完整本地集成脚本和 diff 检查通过。测试覆盖旧配置兼容、权限和游标、sending 恢复为 unknown、只接受 userMessage 核对证据、socket/进程锁、webhook 地址/目标限制及重定向、稳定通知 ID。Codex 子进程输出增加 1 MiB 上限与共享截止时间，实测后代持有 stdout 不会使发送永久阻塞。
+
+[本地集成脚本](../scripts/verify_participant_flows.py) 使用真实 native Waypost HTTP/MCP、临时 SQLite 与独立只读桥凭据，9 种参与方路由、13 项检查通过，并由非实现者独立复跑。覆盖持久保存后 ACK、稳定发送与 ACK 的丢响应恢复、定时处理者重新打开账本后不重复业务、回执不触发通知循环、webhook 接收后断连接进入 unknown 且重启不重发、显式重试保留 delivery_id、待通知记录撤权与恢复。通知和空轮询前后服务端所有应用表内容摘要相同。模拟业务只计算消息字符数，不能当作真实模型或外部动作完成。详细测试与局限见[验收报告](reviews/2026-10-28-participant-acceptance.md)。
+
+Grok 官方文档已实际读取并记录于[调研](reviews/2026-10-28-grok-routines-research.md)：Grok Bot routine 支持 Bearer webhook 和定时执行，Grok.com Automations 使用另一签名协议，当前适配器不实现后者。未创建 routine 或调用真实 Grok webhook，未验证真实 Codex 会话、公网 webhook TLS、真实 DNS 重绑定、断电恢复或 Cloudflare 计费。当前 cloud env 依赖代理，公网 webhook 会按设计拒绝发送，不通过关闭代理来验收。GitHub Actions 已加入本地集成脚本，但未运行 hosted workflow。

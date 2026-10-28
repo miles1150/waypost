@@ -1,6 +1,6 @@
 # Waypost bridge
 
-A single-process local bridge polls a Waypost inbox and queues reference-only notifications to one existing Codex thread. It discards the message returned by the visibility check, never includes its body in the notification, and never submits Waypost receipts. Before dispatch it checks that the credential can still read the message. Non-message feed entries are recorded but not dispatched.
+A single-process local bridge polls a Waypost inbox and sends reference-only notifications to a configured Codex thread or webhook. It discards the message returned by the visibility check, never includes its body in the notification, and never submits Waypost receipts. Before dispatch it checks that the credential can still read the message. Non-message feed entries are recorded but not dispatched.
 
 Build with `cargo build --release --locked --manifest-path bridge/Cargo.toml`. The resulting binary is `bridge/target/release/waypost-bridge`.
 
@@ -24,9 +24,11 @@ Create a private directory and a token file containing only the Waypost bearer t
 Use a credential with inbox and message read access to that identity. `codex_remote`, when used, is an explicit `unix:///absolute/path` URL for the existing local app-server. The socket must be owned by the current user and protected from replacement; a connection probe runs before sending. The configured thread must be its exact lowercase UUID. `codex_home` may be an absolute Codex home directory. Use a dedicated private state directory per binding; identity, service, Codex executable, home, remote and thread are pinned on first use. HTTPS is required except for loopback HTTP, intended for local testing. Redirects are disabled. TLS certificate verification uses the system trust store and respects `SSL_CERT_FILE` and `SSL_CERT_DIR` when configured for a trusted proxy or custom CA.
 
 ```sh
+waypost-bridge --config /absolute/path/config.json scan
 waypost-bridge --config /absolute/path/config.json once
 waypost-bridge --config /absolute/path/config.json run
 waypost-bridge --config /absolute/path/config.json status
+waypost-bridge --config /absolute/path/config.json status --items
 waypost-bridge --config /absolute/path/config.json retry-blocked
 waypost-bridge --config /absolute/path/config.json reconcile
 ```
@@ -59,3 +61,23 @@ launchctl print "gui/$(id -u)/org.waypost.bridge"
 ```
 
 The fixed-session queue and reconciliation design was informed by [Yobiru](https://github.com/chekusu/yobiru).
+
+## Webhook adapter
+
+A version 2 configuration can replace the legacy flat Codex fields with one `wake_adapter`. For Codex, use `{"type":"codex","thread_id":"...","codex_path":"/absolute/path/to/codex","codex_remote":null,"codex_home":null}`. The existing flat configuration and its database binding continue to work; do not mix flat and versioned adapter fields.
+
+For a receiver implementing the generic Bearer webhook contract, use a separate private state directory and this adapter:
+
+```json
+{
+  "type": "webhook",
+  "url_file": "/home/me/.config/waypost-bridge/webhook-url",
+  "secret_file": "/home/me/.config/waypost-bridge/webhook-secret"
+}
+```
+
+Put this object in `wake_adapter` in a configuration containing `"config_version": 2` and the common service, token, state and identity fields above. Both files must be owned by the current user and private (0600). The webhook secret must differ from the Waypost token and reside in a separate file. Rotate it only for the same logical recipient; a new credential does not prove that the recipient is unchanged. The URL must be public HTTPS, without credentials, query or fragment. DNS results are checked and pinned before every delivery; redirects are disabled. If any standard HTTP, HTTPS or ALL proxy environment variable is set, delivery stops before sending, even when NO_PROXY is also set; the bridge cannot guarantee target pinning through that proxy. For local tests only, `"allow_loopback_test": true` allows literal 127/8 or ::1 HTTP targets; it does not allow private networks or DNS names.
+
+The webhook receives a versioned JSON reference with `delivery_id`, Space, Actor, Consumer, item and message IDs, and an identical `Idempotency-Key` header. It receives no body or Waypost credential. A 2xx response means accepted, not processed. A timeout, redirect or any other response after an attempt becomes `unknown` and is not automatically retried. `status --items` lists pending, blocked and unknown item IDs for operator review. `reconcile` without arguments cannot inspect a generic webhook; verify the delivery independently before using `reconcile ITEM_ID accepted` or `reconcile ITEM_ID pending`.
+
+The `scan` command only scans and persists references; it does not notify or acknowledge. A scheduled host may instead call Waypost HTTP or MCP directly. Grok Bot routines are a potential receiver for this generic contract but have not been verified here. Grok.com Automations use a different signed protocol and are not supported by this adapter.
