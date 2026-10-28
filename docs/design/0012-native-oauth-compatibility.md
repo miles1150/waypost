@@ -48,3 +48,5 @@ References: [RFC 8252 loopback redirects](https://www.rfc-editor.org/rfc/rfc8252
 Regression: 124 Rust tests passed, including new native-callback and duplicate-resource cases; native/Wasm strict Clippy passed. No schema migration is needed for this compatibility change. Existing registrations omit the new boolean and remain exact-match.
 
 Actual CLI results: login succeeded with a dynamically chosen port and the exact suffix path; the explicit-resource configuration sent two identical resource parameters. Removing `iss` or replacing it with another origin caused Codex to reject the callback with an issuer-specific error. Official SDK refresh/revocation and local Workerd concurrency regressions also passed after these changes. No claim is made that Codex itself exercised refresh or model/tool execution in this login test.
+
+Deployment preparation and exact experiment registration are collected in the [local handoff](0013-local-handoff.md).

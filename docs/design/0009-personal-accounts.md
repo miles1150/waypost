@@ -36,7 +36,7 @@ Public signup is not a launch-ready feature: provider eligibility/verification, 
 
 ## Safe adoption and recovery
 
-1. Back up the existing database and objects using the normal maintenance process; verify restoration in isolation. Apply additive migration 0013 before new application code. Native startup applies registered migrations automatically; Worker requires explicit D1 migration. This draft does neither in production.
+1. Back up the existing database and objects using the normal maintenance process; verify restoration in isolation. For the current branch, apply additive migrations 0013 and 0014 in order before new application code (the original account-only preview used 0013). Native startup applies registered migrations automatically; Worker requires explicit D1 migration. This draft does neither in production.
 2. Keep OIDC absent initially and verify old owners, invitations, tokens and bridge behavior. Configure a test provider and controlled signup only in staging first.
 3. A new account may create a personal Space. An existing owner claims their existing Space using both a fresh account session and the **current Space owner key**. Agent tokens and the global operator secret are not accepted as claim proof. Do not create replacement identities for the existing bridge.
 4. Select the Space. Create a new Agent identity or reuse the intended existing Actor/Consumer; inspect and approve only a code shown on your own device. Each computer pairs independently. Test describe, a harmless send/read, receipt and explicit one-reply limit.

@@ -32,6 +32,7 @@ class AccountMigration(unittest.TestCase):
         COMMIT;
         """)
         tables=[r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
+        columns={t:[r[1] for r in db.execute(f'PRAGMA table_info("{t}")')] for t in tables}
         before={t:db.execute(f'SELECT * FROM "{t}"').fetchall() for t in tables}
         backup='\n'.join(db.iterdump())
         db.executescript((ROOT/'migrations/0013_personal_accounts.sql').read_text())
@@ -41,6 +42,13 @@ class AccountMigration(unittest.TestCase):
         self.assertEqual(before,{t:restored.execute(f'SELECT * FROM "{t}"').fetchall() for t in tables})
         db.executescript((ROOT/'migrations/0014_mcp_oauth.sql').read_text())
         self.assertEqual('legacy', db.execute("SELECT credential_kind FROM tokens WHERE token_id='t'").fetchone()[0])
+        # Schema14 adds one token column; all pre-upgrade values must survive.
+        after14={}
+        for table in tables:
+            projection=','.join('"'+column+'"' for column in columns[table])
+            after14[table]=db.execute(f'SELECT {projection} FROM "{table}"').fetchall()
+        self.assertEqual(before, after14)
+        self.assertEqual([],db.execute('PRAGMA foreign_key_check').fetchall())
         db.executescript("""
         INSERT INTO accounts VALUES('account','https://issuer.example','sub',1,0);
         INSERT INTO account_spaces VALUES('s','account',0);
