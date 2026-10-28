@@ -48,7 +48,7 @@ Waypost 是中立的开源基础设施。助手在自己的运行环境里执行
 
 ## 账号与插件预览（未启用）
 
-独立分支实现了[个人账号与设备配对预览](docs/design/0009-personal-accounts.md)及[本地插件原型](plugins/waypost/README.md)。需要运行者显式配置 OIDC，默认关闭；现有邀请和密钥继续有效。自定义设备配对不等于标准 MCP OAuth，真实身份提供方和宿主安装尚需验收。
+独立分支实现了[个人账号与设备配对预览](docs/design/0009-personal-accounts.md)及[本地插件原型](plugins/waypost/README.md)。需要运行者显式配置 OIDC，默认关闭；现有邀请和密钥继续有效。自定义设备配对与另行启用的[标准 MCP OAuth 预注册客户端方案](docs/design/0010-mcp-oauth.md)分开；真实身份提供方和宿主安装尚需验收。
 
 ## 开源与产品关系
 

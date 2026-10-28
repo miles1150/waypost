@@ -44,7 +44,9 @@ pub(crate) fn classify<'a>(method: &str, path: &'a str) -> Route<'a> {
         (_, "/admin/session" | "/admin/invitation" | "/admin/access-request") => {
             return AdminSession;
         }
-        (_, path) if path.starts_with("/account/") => return AdminSession,
+        (_, path) if (path.starts_with("/account/") || path.starts_with("/oauth/")) => {
+            return AdminSession;
+        }
         (_, "/mcp") => return Mcp,
         ("GET", "/v0/describe") => return Describe,
         ("POST", "/v0/uploads") => return UploadPrepare,

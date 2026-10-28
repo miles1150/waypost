@@ -29,6 +29,27 @@ fn secret() -> Result<String> {
     Ok(URL_SAFE_NO_PAD.encode(random_bytes::<32>()?))
 }
 
+// Every statement is guarded by the same transaction's successful owner-proof event.
+// Keep consumed request/refresh history: it remains replay evidence. Terminating the
+// approval and family prevents an unlink/reclaim cycle from reviving old authority.
+fn oauth_detach_statements(event: &str, now: i64) -> Vec<Statement> {
+    vec![
+        Statement::new(
+            "UPDATE oauth_requests SET status='denied' WHERE status IN('pending','approved') AND EXISTS(SELECT 1 FROM account_audit e WHERE e.event_id=? AND e.account_id=oauth_requests.account_id AND e.space_id=oauth_requests.space_id)",
+            vec![event.into()],
+        ),
+        Statement::new(
+            "UPDATE oauth_families SET revoked_at=COALESCE(revoked_at,?) WHERE EXISTS(SELECT 1 FROM account_audit e WHERE e.event_id=? AND e.account_id=oauth_families.account_id AND e.space_id=oauth_families.space_id)",
+            vec![now.into(), event.into()],
+        ),
+        // OAuth-kind also catches an orphaned mapping. Legacy credentials are unaffected.
+        Statement::new(
+            "UPDATE tokens SET revoked_at=?,authority_version=authority_version+1 WHERE revoked_at IS NULL AND ((credential_kind='oauth' AND EXISTS(SELECT 1 FROM account_audit e WHERE e.event_id=? AND e.space_id=tokens.space_id)) OR token_id IN(SELECT at.token_id FROM oauth_access_tokens at JOIN oauth_families f ON f.family_id=at.family_id JOIN account_audit e ON e.account_id=f.account_id AND e.space_id=f.space_id WHERE e.event_id=?))",
+            vec![now.into(), event.into(), event.into()],
+        ),
+    ]
+}
+
 impl<D: Database, O: ObjectStore> App<D, O> {
     /// Explicit opt-in; never reads caller-supplied identity headers. Zero disables signup.
     pub fn with_accounts(
@@ -43,8 +64,11 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                 "Account signup limit exceeds experimental maximum.",
             ));
         }
-        if !self.config.public_origin.starts_with("https://")
-            && !self.config.public_origin.starts_with("http://127.0.0.1:")
+        let origin = url::Url::parse(&self.config.public_origin)
+            .map_err(|_| Error::invalid("Invalid account origin."))?;
+        if origin.origin().ascii_serialization() != self.config.public_origin
+            || (origin.scheme() != "https"
+                && !(origin.scheme() == "http" && origin.host_str() == Some("127.0.0.1")))
         {
             return Err(Error::invalid(
                 "Accounts require HTTPS or literal loopback development origin.",
@@ -193,10 +217,16 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                 &URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())),
                 &format!("{}/account/callback", self.config.public_origin),
             )?;
-            self.db.batch(vec![
+            let rows = self.db.batch(vec![
                 Statement::new("DELETE FROM account_login_attempts WHERE expires_at<=?",vec![now.into()]),
-                Statement::new("INSERT INTO account_login_attempts(state_digest,browser_digest,nonce,verifier,expires_at) SELECT ?,?,?,?,? WHERE (SELECT count(*) FROM account_login_attempts)<1000",vec![digest(&state),digest(&browser),nonce.into(),verifier.into(),(now+600_000).into()])
+                Statement::new("INSERT INTO account_login_attempts(state_digest,browser_digest,nonce,verifier,expires_at) SELECT ?,?,?,?,? WHERE (SELECT count(*) FROM account_login_attempts)<1000 RETURNING state_digest",vec![digest(&state),digest(&browser),nonce.into(),verifier.into(),(now+600_000).into()])
             ]).await?;
+            if rows[1].is_empty() {
+                return Err(Error::new(
+                    "RATE_LIMITED",
+                    "Too many outstanding login attempts.",
+                ));
+            }
             let mut out = Response::json(200, json!({"ok":true,"data":{"authorization_url":url}}));
             out.headers.insert("set-cookie".into(),format!("waypost_login={browser}; Path=/account; HttpOnly; SameSite=Lax; Max-Age=600{secure}"));
             return Ok(out);
@@ -222,13 +252,35 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             let sid = required(&body, "space_id")?;
             let owner = required(&body, "owner_credential")?;
             let event = random_id("ownership")?;
-            self.db.batch(vec![
-                Statement::new("INSERT INTO account_audit(event_id,account_id,space_id,action,created_at) SELECT ?,m.account_id,m.space_id,'recovery_detach',? FROM account_spaces m JOIN space_admin_credentials c ON c.space_id=m.space_id WHERE m.space_id=? AND c.credential_digest=? AND c.revoked_at IS NULL",vec![event.clone().into(),now.into(),sid.clone().into(),digest(&owner)]),
-                Statement::new("UPDATE tokens SET revoked_at=?,authority_version=authority_version+1 WHERE revoked_at IS NULL AND token_id IN(SELECT d.token_id FROM account_devices d JOIN account_audit e ON e.account_id=d.account_id AND e.space_id=d.space_id WHERE e.event_id=?)",vec![now.into(),event.clone().into()]),
-                Statement::new("UPDATE account_devices SET state='revoked' WHERE state IN('approved','consumed') AND EXISTS(SELECT 1 FROM account_audit e WHERE e.event_id=? AND e.account_id=account_devices.account_id AND e.space_id=account_devices.space_id)",vec![event.clone().into()]),
-                Statement::new("UPDATE account_sessions SET selected_space_id=NULL WHERE EXISTS(SELECT 1 FROM account_audit e WHERE e.event_id=? AND e.account_id=account_sessions.account_id AND e.space_id=account_sessions.selected_space_id)",vec![event.clone().into()]),
-                Statement::new("DELETE FROM account_spaces WHERE EXISTS(SELECT 1 FROM account_audit e WHERE e.event_id=? AND e.account_id=account_spaces.account_id AND e.space_id=account_spaces.space_id)",vec![event.clone().into()]),
-            ]).await?;
+            let mut statements = vec![
+                Statement::new(
+                    "INSERT INTO account_audit(event_id,account_id,space_id,action,created_at) SELECT ?,m.account_id,m.space_id,'recovery_detach',? FROM account_spaces m JOIN space_admin_credentials c ON c.space_id=m.space_id WHERE m.space_id=? AND c.credential_digest=? AND c.revoked_at IS NULL",
+                    vec![
+                        event.clone().into(),
+                        now.into(),
+                        sid.clone().into(),
+                        digest(&owner),
+                    ],
+                ),
+                Statement::new(
+                    "UPDATE tokens SET revoked_at=?,authority_version=authority_version+1 WHERE revoked_at IS NULL AND token_id IN(SELECT d.token_id FROM account_devices d JOIN account_audit e ON e.account_id=d.account_id AND e.space_id=d.space_id WHERE e.event_id=?)",
+                    vec![now.into(), event.clone().into()],
+                ),
+                Statement::new(
+                    "UPDATE account_devices SET state='revoked' WHERE state IN('approved','consumed') AND EXISTS(SELECT 1 FROM account_audit e WHERE e.event_id=? AND e.account_id=account_devices.account_id AND e.space_id=account_devices.space_id)",
+                    vec![event.clone().into()],
+                ),
+                Statement::new(
+                    "UPDATE account_sessions SET selected_space_id=NULL WHERE EXISTS(SELECT 1 FROM account_audit e WHERE e.event_id=? AND e.account_id=account_sessions.account_id AND e.space_id=account_sessions.selected_space_id)",
+                    vec![event.clone().into()],
+                ),
+                Statement::new(
+                    "DELETE FROM account_spaces WHERE EXISTS(SELECT 1 FROM account_audit e WHERE e.event_id=? AND e.account_id=account_spaces.account_id AND e.space_id=account_spaces.space_id)",
+                    vec![event.clone().into()],
+                ),
+            ];
+            statements.extend(oauth_detach_statements(&event, now));
+            self.db.batch(statements).await?;
             let done = self
                 .db
                 .query(Statement::new(
@@ -411,6 +463,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                 q.push(Statement::new("UPDATE account_devices SET state='revoked' WHERE account_id=? AND space_id=? AND state IN('approved','consumed') AND EXISTS(SELECT 1 FROM account_audit WHERE event_id=?)",vec![aid.clone().into(),sid.clone().into(),event.clone().into()]));
                 q.push(Statement::new("DELETE FROM account_spaces WHERE space_id=? AND account_id=? AND EXISTS(SELECT 1 FROM account_audit WHERE event_id=?)",vec![sid.clone().into(),aid.clone().into(),event.clone().into()]));
                 q.push(Statement::new("UPDATE account_sessions SET selected_space_id=NULL WHERE selected_space_id=? AND account_id=? AND EXISTS(SELECT 1 FROM account_audit WHERE event_id=?)",vec![sid.into(),aid.into(),event.clone().into()]));
+                q.extend(oauth_detach_statements(&event, now));
             }
             self.db.batch(q).await?;
             let done = self
@@ -603,6 +656,111 @@ mod tests {
     }
     async fn action(app: &TestApp, path: &str, body: Value) -> Response {
         app.handle(request(app, path, body)).await
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn origin_validation_rejects_url_components_and_prefix_tricks() {
+        for origin in [
+            "https://example.test/path",
+            "https://user@example.test",
+            "https://example.test?x",
+            "https://example.test/",
+            "http://127.0.0.1:80@evil.test",
+            "http://localhost:8787",
+        ] {
+            let (_d, mut app, exchange, _) = fixture().await;
+            app.config.public_origin = origin.into();
+            assert!(
+                app.with_accounts(config(), exchange, 2).is_err(),
+                "{origin}"
+            );
+        }
+        for origin in ["https://example.test", "http://127.0.0.1:8787"] {
+            let (_d, mut app, exchange, _) = fixture().await;
+            app.config.public_origin = origin.into();
+            assert!(app.with_accounts(config(), exchange, 2).is_ok(), "{origin}");
+        }
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn login_capacity_rejects_without_issuing_unpersisted_state() {
+        let (_d, app, _, _) = fixture().await;
+        app.db.batch(vec![Statement::new("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<1000) INSERT INTO account_login_attempts(state_digest,browser_digest,nonce,verifier,expires_at) SELECT randomblob(32),randomblob(32),'nonce','verifier',? FROM n", vec![(app.clock.now_ms()+600000).into()])]).await.unwrap();
+        let response = action(&app, "/account/login", json!({})).await;
+        assert_eq!(
+            response.status,
+            429,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        assert!(!response.headers.contains_key("set-cookie"));
+        app.db
+            .batch(vec![Statement::new(
+                "DELETE FROM account_login_attempts",
+                vec![],
+            )])
+            .await
+            .unwrap();
+        assert_eq!(action(&app, "/account/login", json!({})).await.status, 200);
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn detach_revokes_oauth_permanently_and_preserves_legacy() {
+        for path in ["/account/spaces/unlink", "/account/spaces/recover"] {
+            let (_d, app, _, sid) = fixture().await;
+            let proof = json!({"space_id":sid,"owner_credential":OWNER});
+            assert_eq!(
+                action(&app, "/account/spaces/claim", proof.clone())
+                    .await
+                    .status,
+                200
+            );
+            app.db.batch(vec![
+                Statement::new("INSERT INTO oauth_families SELECT 'family','client','http://127.0.0.1:8787/mcp','space','account_test',space_id,default_actor_id,default_consumer_id,0,9223372036854775807,NULL FROM spaces WHERE space_id=?",vec![sid.clone().into()]),
+                Statement::new("INSERT INTO tokens(token_id,token_digest,space_id,actor_id,consumer_id,created_at,credential_kind) SELECT 'oauth',randomblob(32),space_id,default_actor_id,default_consumer_id,0,'oauth' FROM spaces WHERE space_id=?",vec![sid.clone().into()]),
+                Statement::new("INSERT INTO tokens(token_id,token_digest,space_id,actor_id,consumer_id,created_at,credential_kind) SELECT 'orphan',randomblob(32),space_id,default_actor_id,default_consumer_id,0,'oauth' FROM spaces WHERE space_id=?",vec![sid.clone().into()]),
+                Statement::new("INSERT INTO tokens(token_id,token_digest,space_id,actor_id,consumer_id,created_at) SELECT 'legacy',randomblob(32),space_id,default_actor_id,default_consumer_id,0 FROM spaces WHERE space_id=?",vec![sid.clone().into()]),
+                Statement::new("INSERT INTO oauth_access_tokens VALUES('oauth','family')",vec![]),
+                Statement::new("INSERT INTO oauth_refresh_tokens VALUES(randomblob(32),'family',9223372036854775807,1,'consumed')",vec![]),
+                Statement::new("INSERT INTO oauth_requests(request_id,kind,client_id,resource,scope,status,created_at,expires_at,next_poll_at,account_id,space_id) SELECT value,'code','client','http://127.0.0.1:8787/mcp','space',value,0,9223372036854775807,0,'account_test',? FROM json_each('[\"pending\",\"approved\",\"consumed\"]')",vec![sid.clone().into()]),
+            ]).await.unwrap();
+            assert_eq!(
+                action(
+                    &app,
+                    path,
+                    json!({"space_id":sid,"owner_credential":"wrong"})
+                )
+                .await
+                .status,
+                403
+            );
+            let rows = app
+                .db
+                .query(Statement::new(
+                    "SELECT count(*) AS n FROM oauth_families WHERE revoked_at IS NULL",
+                    vec![],
+                ))
+                .await
+                .unwrap();
+            assert_eq!(integer(&rows[0], "n").unwrap(), 1);
+            assert_eq!(action(&app, path, proof.clone()).await.status, 200);
+            assert_eq!(
+                action(&app, "/account/spaces/claim", proof).await.status,
+                200
+            );
+            let rows=app.db.query(Statement::new("SELECT (SELECT count(*) FROM oauth_families WHERE revoked_at IS NULL) AS families,(SELECT count(*) FROM tokens WHERE token_id IN('oauth','orphan') AND revoked_at IS NULL) AS oauth,(SELECT count(*) FROM tokens WHERE token_id='legacy' AND revoked_at IS NULL) AS legacy,(SELECT count(*) FROM oauth_requests WHERE status='denied') AS denied,(SELECT count(*) FROM oauth_requests WHERE status='consumed') AS consumed,(SELECT count(*) FROM oauth_refresh_tokens WHERE used_at=1) AS history",vec![])).await.unwrap();
+            for (column, expected) in [
+                ("families", 0),
+                ("oauth", 0),
+                ("legacy", 1),
+                ("denied", 2),
+                ("consumed", 1),
+                ("history", 1),
+            ] {
+                assert_eq!(
+                    integer(&rows[0], column).unwrap(),
+                    expected,
+                    "{path}: {column}"
+                );
+            }
+        }
     }
     #[tokio::test(flavor = "current_thread")]
     async fn claim_requires_both_proofs_and_unlink_preserves_legacy_owner() {

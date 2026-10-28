@@ -13,3 +13,5 @@ pub use service::{App, Clock, Config, Limits, SystemClock};
 mod cloudflare;
 
 pub use service::accounts_oidc;
+
+pub use service::oauth::{OAuthClient, OAuthConfig};

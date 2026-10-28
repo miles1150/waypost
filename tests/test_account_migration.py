@@ -39,6 +39,8 @@ class AccountMigration(unittest.TestCase):
         self.assertEqual([],db.execute('PRAGMA foreign_key_check').fetchall())
         restored=sqlite3.connect(':memory:');restored.executescript(backup)
         self.assertEqual(before,{t:restored.execute(f'SELECT * FROM "{t}"').fetchall() for t in tables})
+        db.executescript((ROOT/'migrations/0014_mcp_oauth.sql').read_text())
+        self.assertEqual('legacy', db.execute("SELECT credential_kind FROM tokens WHERE token_id='t'").fetchone()[0])
         db.executescript("""
         INSERT INTO accounts VALUES('account','https://issuer.example','sub',1,0);
         INSERT INTO account_spaces VALUES('s','account',0);
@@ -46,10 +48,24 @@ class AccountMigration(unittest.TestCase):
           VALUES('paired',X'0101010101010101010101010101010101010101010101010101010101010101','s','a','c',0);
         INSERT INTO account_devices(device_id,device_digest,user_digest,code_challenge,display_name,state,created_at,expires_at,next_poll_at,account_id,space_id,actor_id,consumer_id,token_id)
           VALUES('d',zeroblob(32),zeroblob(32),'test','Device','consumed',0,1,0,'account','s','a','c','paired');
+        INSERT INTO oauth_families VALUES('f','client','https://waypost.example/mcp','space','account','s','a','c',0,999999,NULL);
+        INSERT INTO tokens(token_id,token_digest,space_id,actor_id,consumer_id,created_at,credential_kind)
+          VALUES('oauth',randomblob(32),'s','a','c',0,'oauth'),('orphan',randomblob(32),'s','a','c',0,'oauth');
+        INSERT INTO oauth_access_tokens VALUES('oauth','f');
+        INSERT INTO oauth_refresh_tokens VALUES(randomblob(32),'f',999999,1,'consumed-nonce');
+        INSERT INTO oauth_requests(request_id,kind,client_id,resource,scope,status,created_at,expires_at,next_poll_at,account_id,space_id)
+          VALUES('approved','code','client','https://waypost.example/mcp','space','approved',0,999999,0,'account','s'),
+                ('consumed','code','client','https://waypost.example/mcp','space','consumed',0,999999,0,'account','s');
         """)
         db.executescript('BEGIN;\n'+(ROOT/'scripts/account-rollback-revoke.sql').read_text()+'\nCOMMIT;')
         self.assertIsNotNone(db.execute("SELECT revoked_at FROM tokens WHERE token_id='paired'").fetchone()[0])
         self.assertIsNone(db.execute("SELECT revoked_at FROM tokens WHERE token_id='t'").fetchone()[0])
         self.assertEqual('revoked',db.execute("SELECT state FROM account_devices WHERE device_id='d'").fetchone()[0])
         self.assertEqual(1,db.execute('SELECT count(*) FROM account_spaces').fetchone()[0])
+        for token in ('oauth', 'orphan'):
+            self.assertIsNotNone(db.execute("SELECT revoked_at FROM tokens WHERE token_id=?", (token,)).fetchone()[0])
+        self.assertIsNotNone(db.execute("SELECT revoked_at FROM oauth_families").fetchone()[0])
+        self.assertEqual([('approved', 'denied'), ('consumed', 'consumed')], db.execute("SELECT request_id,status FROM oauth_requests ORDER BY request_id").fetchall())
+        self.assertEqual(1, db.execute("SELECT count(*) FROM oauth_refresh_tokens WHERE used_at IS NOT NULL").fetchone()[0])
+        self.assertEqual([], db.execute('PRAGMA foreign_key_check').fetchall())
         db.close();restored.close()

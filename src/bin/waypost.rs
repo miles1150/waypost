@@ -138,6 +138,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         app
     };
+    let app = if let Ok(path) = std::env::var("WAYPOST_OAUTH_CLIENTS_FILE") {
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if !metadata.is_file() || metadata.len() > 65536 {
+            return Err("Invalid OAuth client configuration file.".into());
+        }
+        let config: waypost::OAuthConfig = serde_json::from_slice(&std::fs::read(path)?)
+            .map_err(|_| "Invalid OAuth client configuration.")?;
+        app.with_oauth(config)?
+    } else {
+        app
+    };
     let app = Rc::new(app);
     if command == "init" {
         println!(

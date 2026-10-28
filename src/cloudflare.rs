@@ -453,6 +453,7 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
     let limiter = if matches!(route, crate::http::Route::AdminSession)
         && raw.method() == worker::Method::Post
         && path != "/account/devices/token"
+        && path != "/oauth/token"
     {
         admin_limiter.ok()
     } else if matches!(
@@ -517,6 +518,17 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
         match configured {
             Ok(app) => app,
             Err(_) => return log_and_error(&route_name, Error::internal("OIDC configuration")),
+        }
+    } else {
+        app
+    };
+    let app = if let Ok(raw) = env.var("WAYPOST_OAUTH_CLIENTS") {
+        let configured = serde_json::from_str::<crate::OAuthConfig>(&raw.to_string())
+            .map_err(|_| Error::internal("OAuth configuration"))
+            .and_then(|config| app.with_oauth(config));
+        match configured {
+            Ok(app) => app,
+            Err(_) => return log_and_error(&route_name, Error::internal("OAuth configuration")),
         }
     } else {
         app

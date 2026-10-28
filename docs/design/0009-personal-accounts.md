@@ -11,7 +11,7 @@ Status: draft implementation, disabled by default. No production migration, iden
 - Device tokens check the live account, Space binding and device state on authentication and at final write commit. Existing tokens keep their previous behavior. Revocation cannot erase content already downloaded by an authorized device.
 - `plugins/waypost` is a portable local plugin prototype: stdio MCP forwarding and private device pairing. Claude Code can use the manual stdio configuration fallback; its plugin overlay and both real host installations remain unverified.
 
-OIDC login and MCP authorization are separate protocols. `describe.capabilities.oauth` intentionally remains false. No standard authorization-server/protected-resource discovery, RFC 8628 endpoint claim, refresh token family or automatic host OAuth login is advertised. The local helper uses Waypost's custom JSON pairing. Packaging does not add a scheduler or fix concurrent routine processing.
+OIDC login and MCP authorization are separate protocols. The original account preview did not advertise OAuth. The subsequent [MCP OAuth profile](0010-mcp-oauth.md) adds discovery, standard grants and refresh families behind a separate opt-in; `describe.capabilities.oauth` is true only when that profile is configured. The local helper uses Waypost's custom JSON pairing. Packaging does not add a scheduler or fix concurrent routine processing.
 
 ## Runtime opt-in
 
@@ -46,7 +46,7 @@ Public signup is not a launch-ready feature: provider eligibility/verification, 
 
 ## Rollback without restoring obsolete access
 
-Prefer disabling new login and keeping the new runtime while resolving issues. **An old binary does not enforce account-device authority.** Before rolling back to an older application, enter maintenance and revoke every token referenced by `account_devices` in a transaction (review [maintenance SQL](../../scripts/account-rollback-revoke.sql)); verify zero active account-issued tokens. Preserve account tables, audit and historical data, then switch application version. Legacy credentials continue working; paired devices must later be explicitly paired again. Do not delete `account_devices` records while their tokens remain valid: absence intentionally identifies legacy tokens.
+Prefer disabling new login and keeping the new runtime while resolving issues. **An old binary does not enforce account-device authority.** Before rolling back to an older application, enter maintenance and revoke every token referenced by `account_devices` and every OAuth-kind token in a transaction (review [maintenance SQL](../../scripts/account-rollback-revoke.sql)); verify zero active account-issued tokens. The current script requires schema 14; schema-13-only deployments must use the earlier matching script. Preserve account tables, audit and historical data, then switch application version. Legacy credentials continue working; paired devices must later be explicitly paired again. Do not delete `account_devices` records while their tokens remain valid: absence intentionally identifies legacy tokens.
 
 A backup from before activation is not safe to overwrite a live database after new messages arrived. Quiesce writes, preserve post-activation data and rehearse recovery. No destructive down migration is supplied. The migration test proves existing rows survive additive upgrade and a pre-write backup can be restored; it does not prove production disaster recovery or post-write rollback.
 
@@ -54,7 +54,7 @@ A backup from before activation is not safe to overwrite a live database after n
 
 Automated evidence covers synthetic signed IdP tokens, real native HTTP login/callback/session roundtrip with a mock exchange, actual native token-endpoint HTTP transport, adversarial identity/nonce/algorithm/time validation, claim/unlink/recovery, account session guards, device authority and one-time redemption, migration preservation, UI and local stdio helper behavior. Existing protocol tests remain applicable.
 
-Before activation: independently review this draft, exercise configured provider over real HTTPS including key rotation/outage, verify controlled signup and recovery with a real owner, exercise Worker account routes with staging D1, and load the plugin in actual Codex/Claude Code. Standard MCP OAuth remains a separate implementation milestone. No mock test proves real provider, real host, background wake or exactly-once Agent execution.
+Before activation: independently review this draft, exercise configured provider over real HTTPS including key rotation/outage, verify controlled signup and recovery with a real owner, exercise Worker account routes with staging D1, and load the plugin in actual Codex/Claude Code. The separately configured MCP OAuth profile still requires real-host interoperability acceptance. No mock test proves real provider, real host, background wake or exactly-once Agent execution.
 
 ### Local evidence for this draft
 
