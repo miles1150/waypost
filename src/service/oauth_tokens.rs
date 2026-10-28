@@ -101,12 +101,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                 opaque(code)?;
                 let challenge = verifier(required(&p, "code_verifier")?)?;
                 let redirect = required(&p, "redirect_uri")?;
-                if !self
-                    .oauth_client(client)?
-                    .redirect_uris
-                    .iter()
-                    .any(|uri| uri == redirect)
-                {
+                if !self.oauth_client(client)?.accepts_redirect(redirect) {
                     return Err(oauth_error("invalid_grant"));
                 }
                 let now = self.clock.now_ms();
@@ -365,11 +360,13 @@ pub(super) mod tests {
                     client_id: "test".into(),
                     name: "Test".into(),
                     redirect_uris: vec!["https://client.example/callback".into()],
+                    allow_loopback_port_variation: false,
                 },
                 super::super::oauth::OAuthClient {
                     client_id: "other".into(),
                     name: "Other".into(),
                     redirect_uris: vec![],
+                    allow_loopback_port_variation: false,
                 },
             ],
         });

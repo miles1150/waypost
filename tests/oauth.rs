@@ -75,7 +75,12 @@ impl Fixture {
             clients: vec![OAuthClient {
                 client_id: "client".into(),
                 name: "Integration client".into(),
-                redirect_uris: vec![CALLBACK.into()],
+                redirect_uris: vec![
+                    CALLBACK.into(),
+                    "http://localhost:8766/callback".into(),
+                    "http://127.0.0.1:8765/callback".into(),
+                ],
+                allow_loopback_port_variation: true,
             }],
         })
         .unwrap();
@@ -157,11 +162,14 @@ impl Fixture {
             .body(body.to_string())
     }
     async fn start(&self) -> (String, String) {
+        self.start_redirect(CALLBACK).await
+    }
+    async fn start_redirect(&self, redirect: &str) -> (String, String) {
         let query = url::form_urlencoded::Serializer::new(String::new())
             .extend_pairs([
                 ("client_id", "client"),
                 ("response_type", "code"),
-                ("redirect_uri", CALLBACK),
+                ("redirect_uri", redirect),
                 ("resource", &self.resource()),
                 ("scope", "waypost"),
                 ("state", "opaque&state"),
@@ -436,4 +444,62 @@ async fn http_refresh_replay_and_unlink_invalidate_existing_authority() {
             );
         })
         .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_callbacks_bind_actual_port_and_issuer_through_exchange() {
+    tokio::task::LocalSet::new().run_until(async {
+    let f = Fixture::new().await;
+    let (_, metadata) = decode(
+        f.client
+            .get(format!(
+                "{}/.well-known/oauth-authorization-server",
+                f.origin
+            ))
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(metadata["issuer"], f.origin);
+    assert_eq!(
+        metadata["authorization_response_iss_parameter_supported"],
+        true
+    );
+    for redirect in [
+        "http://localhost:8766/callback",
+        "http://127.0.0.1:54321/callback",
+    ] {
+        let (id, browser) = f.start_redirect(redirect).await;
+        let (status,approved) = decode(f.browser("/oauth/consent", &browser, json!({"request_id":id,"decision":"approve","actor_id":f.space["default_actor_id"],"consumer_id":f.space["default_consumer_id"]})).send().await.unwrap()).await;
+        assert_eq!(status, 200);
+        let callback = url::Url::parse(approved["redirect_uri"].as_str().unwrap()).unwrap();
+        let params: std::collections::BTreeMap<_, _> =
+            callback.query_pairs().into_owned().collect();
+        assert_eq!(params["iss"], f.origin);
+        let mut base = callback.clone();
+        base.set_query(None);
+        assert_eq!(base.as_str(), redirect);
+        let code = &params["code"];
+        for (actual, expected) in [("http://127.0.0.1:54322/callback", 400), (redirect, 200)] {
+            let (status, result) = f
+                .form(
+                    "/oauth/token",
+                    &[
+                        ("client_id", "client"),
+                        ("grant_type", "authorization_code"),
+                        ("code", code),
+                        ("code_verifier", VERIFIER),
+                        ("redirect_uri", actual),
+                        ("resource", &f.resource()),
+                    ],
+                )
+                .await;
+            assert_eq!(status, expected);
+            if status == 200 {
+                assert_eq!(f.mcp(result["access_token"].as_str().unwrap()).await.0, 200);
+            }
+        }
+    }
+    }).await;
 }

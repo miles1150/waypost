@@ -107,7 +107,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         let client_id = parameter(&params, "client_id")?;
         let client = self.oauth_client(&client_id)?;
         let redirect = parameter(&params, "redirect_uri")?;
-        if !client.redirect_uris.contains(&redirect) {
+        if !client.accepts_redirect(&redirect) {
             return Err(oauth_error("invalid_request"));
         }
         let state = params.get("state").cloned();
@@ -158,7 +158,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         let client = self.oauth_client(&client_id)?;
         let redirect = parameter(&params, "redirect_uri")?;
         // Never redirect errors to an unvalidated or subsequently changed client URI.
-        if !client.redirect_uris.contains(&redirect) {
+        if !client.accepts_redirect(&redirect) {
             return Err(oauth_error("invalid_request"));
         }
         if parameter(&params, "response_type")? != "code" {
@@ -236,9 +236,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         if text(row, "resource")? != self.oauth_resource() || text(row, "scope")? != "waypost" {
             return Err(oauth_error("invalid_target"));
         }
-        if text(row, "kind")? == "code"
-            && !client.redirect_uris.contains(&text(row, "redirect_uri")?)
-        {
+        if text(row, "kind")? == "code" && !client.accepts_redirect(&text(row, "redirect_uri")?) {
             return Err(oauth_error("invalid_request"));
         }
         Ok(client.name.clone())
@@ -445,6 +443,7 @@ mod tests {
                 client_id: "client".into(),
                 name: "Test client".into(),
                 redirect_uris: vec!["https://client.example/callback".into()],
+                allow_loopback_port_variation: false,
             }],
         });
         let mut params: BTreeMap<String, String> = [

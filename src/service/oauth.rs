@@ -9,7 +9,49 @@ pub struct OAuthClient {
     pub client_id: String,
     pub name: String,
     pub redirect_uris: Vec<String>,
+    #[serde(default)]
+    pub allow_loopback_port_variation: bool,
 }
+impl OAuthClient {
+    pub(super) fn accepts_redirect(&self, candidate: &str) -> bool {
+        if self.redirect_uris.iter().any(|r| r == candidate) {
+            return true;
+        }
+        if !self.allow_loopback_port_variation {
+            return false;
+        }
+        let Ok(mut requested) = Url::parse(candidate) else {
+            return false;
+        };
+        if requested.as_str() != candidate
+            || requested.scheme() != "http"
+            || !matches!(requested.host_str(), Some("127.0.0.1" | "[::1]"))
+            || requested.port().is_none_or(|p| p == 0)
+            || requested.query().is_some()
+            || requested.fragment().is_some()
+            || !requested.username().is_empty()
+            || requested.password().is_some()
+        {
+            return false;
+        }
+        self.redirect_uris.iter().any(|registered| {
+            let Ok(expected) = Url::parse(registered) else {
+                return false;
+            };
+            if expected.scheme() != "http"
+                || expected.host_str() != requested.host_str()
+                || expected.port().is_none_or(|p| p == 0)
+            {
+                return false;
+            }
+            if requested.set_port(expected.port()).is_err() {
+                return false;
+            }
+            requested.as_str() == registered
+        })
+    }
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OAuthConfig {
@@ -50,11 +92,18 @@ pub(super) fn parse_params(raw: &str) -> Result<BTreeMap<String, String>> {
     }
     let mut out = BTreeMap::new();
     for (k, v) in url::form_urlencoded::parse(raw.as_bytes()) {
-        if k.contains('\u{fffd}')
-            || v.contains('\u{fffd}')
-            || out.insert(k.into_owned(), v.into_owned()).is_some()
-        {
+        if k.contains('\u{fffd}') || v.contains('\u{fffd}') {
             return Err(oauth_error("invalid_request"));
+        }
+        if let Some(previous) = out.get(k.as_ref()) {
+            // RFC 8707 permits repeated resource parameters. This server has
+            // one audience: collapse identical copies, never choose one of
+            // conflicting targets. Other repeated parameters stay invalid.
+            if k != "resource" || previous != v.as_ref() {
+                return Err(oauth_error("invalid_request"));
+            }
+        } else {
+            out.insert(k.into_owned(), v.into_owned());
         }
     }
     Ok(out)
@@ -100,10 +149,10 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                     || r.len() > 2048
                     || !(u.scheme() == "https"
                         || (u.scheme() == "http"
-                            && matches!(u.host_str(), Some("127.0.0.1" | "[::1]"))))
+                            && matches!(u.host_str(), Some("127.0.0.1" | "[::1]" | "localhost"))))
                 {
                     return Err(Error::invalid(
-                        "Redirect must be an exact HTTPS or literal loopback URL without query/fragment.",
+                        "Redirect must be a registered HTTPS or loopback URL without query/fragment.",
                     ));
                 }
             }
@@ -236,6 +285,45 @@ impl<D: Database, O: ObjectStore> App<D, O> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_callback_variation_is_explicit_and_host_path_bound() {
+        let mut client = OAuthClient {
+            client_id: "native".into(),
+            name: "Native".into(),
+            redirect_uris: vec![
+                "http://127.0.0.1:8765/callback".into(),
+                "http://localhost:8766/callback".into(),
+                "http://[::1]:8767/callback".into(),
+            ],
+            allow_loopback_port_variation: false,
+        };
+        assert!(client.accepts_redirect("http://localhost:8766/callback"));
+        assert!(!client.accepts_redirect("http://127.0.0.1:54321/callback"));
+        client.allow_loopback_port_variation = true;
+        assert!(client.accepts_redirect("http://127.0.0.1:54321/callback"));
+        assert!(client.accepts_redirect("http://[::1]:54321/callback"));
+        for uri in [
+            "http://localhost:54321/callback",
+            "http://127.0.0.2:54321/callback",
+            "http://127.0.0.1.evil:54321/callback",
+            "https://127.0.0.1:54321/callback",
+            "http://127.0.0.1:54321/callback/suffix",
+            "http://127.0.0.1:54321/callback?x=1",
+            "http://127.0.0.1:54321/callback#x",
+            "http://user@127.0.0.1:54321/callback",
+            "http://127.0.0.1:0/callback",
+            "http://127.0.0.1/callback",
+            "http://2130706433:54321/callback",
+            "http://127.0.0.1:54321/a/../callback",
+        ] {
+            assert!(!client.accepts_redirect(uri), "{uri}");
+        }
+        let old: OAuthConfig = serde_json::from_str(
+            r#"{"clients":[{"client_id":"x","name":"X","redirect_uris":[]}]}"#,
+        )
+        .unwrap();
+        assert!(!old.clients[0].allow_loopback_port_variation);
+    }
     #[test]
     fn edge_throttle_preserves_oauth_error_contract() {
         let response = rate_limited_response();
