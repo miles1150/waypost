@@ -39,6 +39,10 @@ pub const MIGRATIONS: &[(&str, &str)] = &[
         "0010_query_indexes.sql",
         include_str!("../../migrations/0010_query_indexes.sql"),
     ),
+    (
+        "0011_token_permissions.sql",
+        include_str!("../../migrations/0011_token_permissions.sql"),
+    ),
 ];
 
 #[cfg(test)]

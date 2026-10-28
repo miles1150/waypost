@@ -385,7 +385,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                 "tokens",
                 "token_id",
                 "created_at",
-                "token_id,actor_id,consumer_id,default_recipient_id,expires_at,revoked_at,created_at,(SELECT json_group_array(scope) FROM token_scopes ts WHERE ts.token_id=tokens.token_id) AS scopes_json",
+                "token_id,actor_id,consumer_id,authority_version,default_recipient_id,expires_at,revoked_at,created_at,(SELECT json_group_array(scope) FROM token_scopes ts WHERE ts.token_id=tokens.token_id) AS scopes_json",
                 "actor_id",
             ),
             "blobs" => (

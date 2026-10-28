@@ -17,6 +17,9 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --all-targets --locked
       - run: cargo build --locked
+      - run: cargo build --locked --manifest-path bridge/Cargo.toml
+      - name: Local participant protocol and simulated wake acceptance
+        run: python3 scripts/verify_participant_flows.py
       - run: python3 -m unittest discover -s tests -p 'test_*.py' -v
       - uses: actions/setup-node@v4
         with:

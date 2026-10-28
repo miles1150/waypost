@@ -162,7 +162,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                 p.space_id.clone().into(),
                 p.consumer_id.clone().into(),
                 p.view_revision.into(),
-                p.grant_fingerprint.clone().into(),
+                self.feed_grant_fingerprint(p)?.into(),
                 (position as i64).into(),
                 now.into(),
             ];

@@ -1,6 +1,6 @@
 // Runs against an explicitly selected disposable native or local Worker service.
 import {JSDOM} from 'jsdom';
-import {readFileSync} from 'node:fs';
+import {loadDashboard} from './dashboard-fixture.mjs';
 import {randomUUID,createHash,webcrypto} from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import assert from 'node:assert/strict';
@@ -28,7 +28,8 @@ for(const [index,bytes] of contents.entries()) {
 }
 await call('/v0/memory/collections/'+collection.collection_id+'/revisions',{request_id:prefix+'-v1',expected_revision:0,mode:'snapshot',items},source.token);
 const owner=await call(root+'/owner-credential',{expected_version:0});
-const dom=new JSDOM(readFileSync(new URL('../../dashboard/index.html',import.meta.url),'utf8'),{url:origin+'/dashboard',runScripts:'outside-only'}),w=dom.window,d=w.document;
+const dashboard=await loadDashboard(origin);
+const dom=new JSDOM(dashboard.html,{url:origin+'/dashboard',runScripts:'outside-only'}),w=dom.window,d=w.document;
 Object.defineProperty(w,'crypto',{value:webcrypto});Object.defineProperty(d,'visibilityState',{value:'visible'});
 w.TextEncoder=TextEncoder;w.TextDecoder=TextDecoder;w.Blob=Blob;
 w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};w.HTMLDialogElement.prototype.close=function(){this.open=false;this.dispatchEvent(new w.Event('close'));};
@@ -39,7 +40,7 @@ w.fetch=async(path,options={})=>{
   try {const response=await fetch(new URL(path,origin),{...options,headers:{...options.headers,'user-agent':'Waypost/0.1.0',origin,...(cookie?{cookie}:{})}});const next=response.headers.get('set-cookie');if(next)cookie=next.split(';')[0];return response;}finally{pending--;}
 };
 try {
-  for(const file of ['i18n.js','memory.js','app.js'])w.eval(readFileSync(new URL('../../dashboard/'+file,import.meta.url),'utf8'));
+  for(const script of dashboard.scripts)w.eval(script);
   await w.WaypostI18n.set('zh');
   await new Promise(r=>setTimeout(r,100));d.querySelector('#secret').value=owner.credential;d.querySelector('#login-form').dispatchEvent(new w.Event('submit',{cancelable:true}));
   await wait(()=>!d.querySelector('#app').hidden&&d.querySelector('#content').children.length);

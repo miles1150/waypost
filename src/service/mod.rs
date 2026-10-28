@@ -26,6 +26,7 @@ mod memory;
 mod onboarding;
 mod privacy;
 mod receipts;
+mod token_permissions;
 
 #[derive(Clone)]
 pub struct Config {

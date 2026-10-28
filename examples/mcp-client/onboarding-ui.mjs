@@ -1,17 +1,19 @@
 import { JSDOM } from 'jsdom';
-import { readFileSync } from 'node:fs';
+import { loadDashboard } from './dashboard-fixture.mjs';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 
 const origin=process.env.WAYPOST_URL||'http://127.0.0.1:8787',admin=process.env.WAYPOST_ADMIN_SECRET;
 if(!admin)throw new Error('Provide WAYPOST_ADMIN_SECRET privately.');
 const wait=async predicate=>{for(let i=0;i<500;i++){if(predicate())return;await new Promise(r=>setTimeout(r,20));}throw new Error('Expected Dashboard state was not reached');};
+const dashboard=await loadDashboard(origin);
 const windows=[]; let pendingRequests=0;
 function page(hash=''){
- const dom=new JSDOM(readFileSync(new URL('../../dashboard/index.html',import.meta.url),'utf8'),{url:origin+'/dashboard'+hash,runScripts:'outside-only'}),w=dom.window;windows.push(w);let cookie='';
+ const dom=new JSDOM(dashboard.html,{url:origin+'/dashboard'+hash,runScripts:'outside-only'}),w=dom.window;windows.push(w);let cookie='';
  w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
  w.HTMLDialogElement.prototype.close=function(){this.open=false;this.dispatchEvent(new w.Event('close'));};
  w.confirm=()=>true;
+ w.TextEncoder=TextEncoder;w.TextDecoder=TextDecoder;w.Blob=Blob;
  w.fetch=async(path,options={})=>{
    pendingRequests++;
    try {
@@ -22,8 +24,7 @@ function page(hash=''){
    return {ok:response.ok,status:response.status,json:async()=>value};
    } finally {pendingRequests--;}
  };
- w.eval(readFileSync(new URL('../../dashboard/i18n.js',import.meta.url),'utf8'));
- w.eval(readFileSync(new URL('../../dashboard/app.js',import.meta.url),'utf8'));
+ for(const script of dashboard.scripts)w.eval(script);
  return w;
 }
 function submit(form){form.dispatchEvent(new form.ownerDocument.defaultView.Event('submit',{bubbles:true,cancelable:true}));}

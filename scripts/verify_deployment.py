@@ -13,6 +13,27 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'examples'))
 from consumer import USER_AGENT
 
 
+def check_response_policy(status, headers, body, *, public_dashboard=False):
+    """Only the anonymous static shell may revalidate instead of being no-store."""
+    if public_dashboard:
+        assert not headers.get('set-cookie'), 'Public Dashboard must not set credentials.'
+        if status in (301, 302, 307, 308):
+            assert headers.get('location') == '/dashboard/', 'Unexpected Dashboard redirect.'
+            assert body == b'', 'Dashboard canonical redirect must be empty.'
+        else:
+            assert status == 200, 'Dashboard HTML did not load.'
+            policy = {part.strip().lower() for part in headers.get('cache-control', '').split(',')}
+            assert ('no-store' in policy or 'no-cache' in policy or
+                    {'max-age=0', 'must-revalidate'} <= policy), 'Dashboard HTML must revalidate.'
+            assert 'text/html' in headers.get('content-type', ''), 'Dashboard must be HTML.'
+            assert isinstance(body, bytes) and all(marker in body for marker in
+                (b'id="login-form"', b'id="secret"', b'id="app" hidden')), 'Expected anonymous Dashboard template.'
+    elif headers.get('cache-control') != 'no-store':
+        raise AssertionError('Service response must not be cached.')
+    if headers.get('x-content-type-options') != 'nosniff':
+        raise AssertionError('Service response must disable MIME sniffing.')
+
+
 def verify(origin, admin_secret, check_rate_limit=False, check_api_rate_limit=False):
     parsed = urllib.parse.urlsplit(origin)
     if parsed.scheme != 'https' and not (parsed.scheme == 'http' and parsed.hostname in ('localhost', '127.0.0.1')):
@@ -24,7 +45,7 @@ def verify(origin, admin_secret, check_rate_limit=False, check_api_rate_limit=Fa
     connection = connection_type(parsed.hostname, parsed.port, timeout=30)
     checks = []
 
-    def request(method, path, value=None, headers=None):
+    def request(method, path, value=None, headers=None, *, public_dashboard=False):
         data = json.dumps(value).encode() if value is not None else None
         # One connection keeps edge probes bound to the same client/Cloudflare location.
         # http.client does not follow redirects or forward operator credentials elsewhere.
@@ -33,16 +54,16 @@ def verify(origin, admin_secret, check_rate_limit=False, check_api_rate_limit=Fa
         raw = response.read()
         status, actual_headers = response.status, response.headers
         body = json.loads(raw) if 'application/json' in actual_headers.get('content-type', '') else raw
-        if actual_headers.get('cache-control') != 'no-store':
-            raise AssertionError('Service response must not be cached.')
-        if actual_headers.get('x-content-type-options') != 'nosniff':
-            raise AssertionError('Service response must disable MIME sniffing.')
+        check_response_policy(status, actual_headers, body, public_dashboard=public_dashboard)
         return status, actual_headers, body
 
     status, _, body = request('GET', '/health')
     assert status == 200 and body['data']['status'] == 'ok', 'Liveness check failed.'
     checks.append('liveness')
-    status, headers, _ = request('GET', '/dashboard')
+    status, headers, _ = request('GET', '/dashboard', public_dashboard=True)
+    if status in (301, 302, 307, 308):
+        # Only this exact public canonical redirect is followed, without credentials.
+        status, headers, _ = request('GET', '/dashboard/', public_dashboard=True)
     assert status == 200 and "frame-ancestors 'none'" in headers.get('content-security-policy', ''), 'Dashboard CSP missing.'
     if parsed.scheme == 'https':
         assert 'max-age=' in headers.get('strict-transport-security', ''), 'HTTPS transport policy missing.'

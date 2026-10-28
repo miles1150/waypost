@@ -134,3 +134,48 @@ PR #14（`f5415ba`）已合并自助接入状态、资料编辑、固定版本 Z
 另新增四项 DOM 回归，先复现保存期间仍可输入导致丢字的问题，再使编辑框在上传准备和版本发布期间保持只读。保存成功、存储错误、CAS 冲突，以及保存期间返回后继续修改均覆盖；迟到响应不会覆盖新打开的草稿，失败后恢复编辑。完整 Dashboard DOM 组共 14 项通过。指南同步最新内容比较、返回列表恢复草稿和明确核对后变更新基线的操作。
 
 本节依据合成数据的本机记录与新增回归，没有读取生产用户数据、执行生产备份或复验上一节的生产恢复记录。本机恢复结果不代表停写一致的完整生产灾备演练；生产可用性、容量、密码学审计与第三方模型协作仍按各自边界验收。
+
+
+## 连接权限编辑与本地桥（2026-10-28）
+
+设计与独立审查见 [方案](design/0006-local-bridge-and-connection-permissions.md) 和 [评审记录](reviews/2026-10-28-bridge-permissions-design.md)。由独立子代理审查，后端和 Dashboard 子代理及 Terra 桥接实现，主代理在 cloud env 集成、构建、部署和验收。
+
+### 实际发布
+
+生产入口 `https://waypost.miles1150.top`，Worker `waypost-production`。保存生产 D1 导出后应用兼容迁移 `0011_token_permissions.sql`，保留原 D1/R2、限速绑定与三项生产 secrets。最终 Worker Version 为 `b7e041a7-28f5-40e0-b47c-c368f54180b0`，Deployment 为 `c5638ef2-6945-4e52-9c37-b78fde74b3b6`，100% 流量。原版本 `91925311-7b67-4226-8898-1a7513baa469` 保留用于回滚。
+
+首次发布 `7697b4ad-2688-4ad8-b24b-d3eb73167492` 后，追加审查发现所有者授权需在提交事务内再次校验，立即回退旧版；补上精确凭据/session 校验、撤销/轮换/logout 与真正并发 CAS 测试并独立复核后，才发布最终版本。审计表为添加式迁移，回退代码没有删除它。
+
+### 检查与验收证据
+
+- 全部 native Rust 测试通过；最终权限补充测试包括 4 个模块内测试、4 个接口测试。
+- native 与 wasm strict Clippy、格式和 diff 检查通过；最终 owner-fence 变更完成 native Clippy 和实际 wasm release 构建。
+- 18 项 Dashboard DOM 测试、11 项 Python 测试通过。
+- bridge 的 9 项故障/权限/去重测试与 strict Clippy 通过；构建 Linux x86-64 release 二进制。
+- Cloudflare dry-run、实际版本上传通过，最终 Worker 启动时间报告 2 ms；这不是请求 CPU 压测。
+- 最终线上 Dashboard 与 HTML 中引用的四个 fingerprinted JS/CSS 资源全部 HTTP 200。
+- cloud env 使用真实 HTTPS HTTP/MCP 和 D1，在独立合成 Space 执行 `scripts/verify_bridge_permissions.py`：同一 bearer 增减权限、历史读取、身份保留、自提权拒绝、CAS、相同请求重放、MCP describe/inbox 全通过。
+- 同一验收使用实际 release bridge 二进制与模拟 Codex CLI，确认仅一次通知、重启去重、空 feed、权限视图变化重扫不重复通知。
+- 修复 cloud env 实测发现的 TLS `UnknownIssuer`：bridge 改用系统 CA 根，支持 `SSL_CERT_FILE`/`SSL_CERT_DIR`，始终保留证书验证。随后两次真实 HTTPS 空轮询以及完整集成验收通过。
+- 完整验收曾遇到一次网络 URLError，后续完整重跑通过；不将该失败计作通过。
+
+合成测试通过独立 owner 夹具初始化，不读取或更改用户消息。脚本撤销自身创建的测试凭据、停用助手；最终清理覆盖整个指定合成 Space，包括所有测试 token、Consumer 与 owner 凭据。保留合成消息和审计用于追溯。部署临时 Cloudflare token 在发布完成后撤销。
+
+### 验收边界
+
+真实 Codex 官方 CLI 已存在于 cloud env，但没有指定可用的真实目标会话，因此不声称实际模型已被唤醒或完成任务。Linux 实际运行；macOS 安装模板/构建矩阵已提供，未在真实 macOS 或 hosted Actions 验收。独立官网指南仅更新源码，未发布其另外的托管站点。
+
+空轮询没有新 feed 项或队列调用，客户端路径只执行读操作；尚未以 Cloudflare D1 billing counters 单独量测零写入，也未进行大量不可见记录扫描或请求 CPU 压测。五设备每 30–60 秒轮询的预算属于设计估算。
+
+
+## 通用参与方与唤醒适配器（2026-10-28，后续本地实现）
+
+本轮在 `5506799` 基础上继续原工作区，先完成 [0007 设计](design/0007-participants-and-wake-adapters.md) 和[独立审查](reviews/2026-10-28-participant-adapters-review.md)，再由 Terra 实现通用适配器，由另一子代理实现本地集成验收。未修改服务端协议、数据库迁移、生产部署、凭据或网络设置；未合并或推送这些后续改动。
+
+代码将公共 Config、扫描及通知账本与 `Codex` / `Webhook` 目标区分，Codex 进程与核对代码移入独立模块。Webhook 使用私密 URL/独立 Bearer 文件、引用 payload 和稳定 delivery_id；每次投递核对固定目标，公网 HTTPS 地址检查及 DNS 固定，禁止重定向，在无法保证固定目标的环境代理下发送前拒绝。只有显式 literal-loopback 测试配置允许本机 HTTP。旧平铺 Codex 配置与新版配置映射到原有八元绑定，不清空游标、accepted 或 unknown。`scan` 不投递；`status --items` 提供人工核对引用。桥不代发 received/processed。
+
+主代理复跑桥的 15 项 Rust 测试通过，最终格式检查、strict Clippy、debug 构建、完整本地集成脚本和 diff 检查通过。测试覆盖旧配置兼容、权限和游标、sending 恢复为 unknown、只接受 userMessage 核对证据、socket/进程锁、webhook 地址/目标限制及重定向、稳定通知 ID。Codex 子进程输出增加 1 MiB 上限与共享截止时间，实测后代持有 stdout 不会使发送永久阻塞。
+
+[本地集成脚本](../scripts/verify_participant_flows.py) 使用真实 native Waypost HTTP/MCP、临时 SQLite 与独立只读桥凭据，9 种参与方路由、13 项检查通过，并由非实现者独立复跑。覆盖持久保存后 ACK、稳定发送与 ACK 的丢响应恢复、定时处理者重新打开账本后不重复业务、回执不触发通知循环、webhook 接收后断连接进入 unknown 且重启不重发、显式重试保留 delivery_id、待通知记录撤权与恢复。通知和空轮询前后服务端所有应用表内容摘要相同。模拟业务只计算消息字符数，不能当作真实模型或外部动作完成。详细测试与局限见[验收报告](reviews/2026-10-28-participant-acceptance.md)。
+
+Grok 官方文档已实际读取并记录于[调研](reviews/2026-10-28-grok-routines-research.md)：Grok Bot routine 支持 Bearer webhook 和定时执行，Grok.com Automations 使用另一签名协议，当前适配器不实现后者。未创建 routine 或调用真实 Grok webhook，未验证真实 Codex 会话、公网 webhook TLS、真实 DNS 重绑定、断电恢复或 Cloudflare 计费。当前 cloud env 依赖代理，公网 webhook 会按设计拒绝发送，不通过关闭代理来验收。GitHub Actions 已加入本地集成脚本，但未运行 hosted workflow。

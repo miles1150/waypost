@@ -144,6 +144,9 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             let sid = parts[3];
             check_id(sid)?;
             self.admin_space(sid).await?;
+            if parts.len() == 7 && parts[4] == "tokens" && parts[6] == "permissions" {
+                return self.token_permissions(request, sid, parts[5], body).await;
+            }
             if request.method == "GET" && parts.len() == 5 && parts[4] == "connection-status" {
                 return self.connection_status(sid).await;
             }
