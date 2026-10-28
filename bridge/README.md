@@ -37,7 +37,7 @@ waypost-bridge --config /absolute/path/config.json reconcile
 
 A queue attempt is recorded as `sending` before starting Codex. An interrupted attempt or a response without exactly one valid receipt is `unknown`, and is never automatically retried. `reconcile` reads the configured thread through the official Codex app-server and accepts an unknown item only when its marker appears in a user message. A missing marker does not prove non-delivery. If you have independently established the outcome, an operator can explicitly resolve one item using `reconcile ITEM_ID accepted` or `reconcile ITEM_ID pending`; the latter permits a new send and can duplicate a notification if the first attempt actually succeeded. State stores references and queue status, not message content.
 
-The manual GitHub Actions workflow builds and tests Linux x86-64 and macOS x86-64/ARM64 archives with SHA-256 files as workflow artifacts. It does not publish a release.
+The GitHub Actions workflow builds and tests Linux x86-64 and macOS x86-64/ARM64 archives with SHA-256 files as workflow artifacts after bridge changes merge to main, or on manual dispatch. Archives include the source COMMIT. It does not publish a release.
 
 A message that returns 404 at the visibility check is marked `blocked` and is not repeatedly checked. A cursor scope reset returns blocked items to pending; after independently resolving access, `retry-blocked` explicitly retries all blocked items.
 

@@ -28,7 +28,8 @@ jobs:
   build:
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
-    if: github.event_name == 'workflow_dispatch'
+    needs: checks
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
 
     strategy:
       fail-fast: false
