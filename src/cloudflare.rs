@@ -452,6 +452,7 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
     let route = crate::http::classify(raw.method().as_ref(), &path);
     let limiter = if matches!(route, crate::http::Route::AdminSession)
         && raw.method() == worker::Method::Post
+        && path != "/account/devices/token"
     {
         admin_limiter.ok()
     } else if matches!(
@@ -499,6 +500,27 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
         config,
     )
     .with_limits(limits);
+    let app = if let Ok(raw_config) = env.secret("WAYPOST_OIDC_CONFIG") {
+        let configured: Result<_> = (|| {
+            let config: crate::service::accounts_oidc::OidcConfig =
+                serde_json::from_str(&raw_config.to_string())
+                    .map_err(|_| Error::internal("OIDC configuration"))?;
+            let exchange = crate::service::accounts_oidc::OidcHttpExchange::new(&config)?;
+            let limit = env
+                .var("WAYPOST_ACCOUNT_SIGNUP_LIMIT")
+                .map(|v| v.to_string())
+                .unwrap_or_else(|_| "0".into())
+                .parse::<usize>()
+                .map_err(|_| Error::internal("account signup limit"))?;
+            app.with_accounts(config, std::rc::Rc::new(exchange), limit)
+        })();
+        match configured {
+            Ok(app) => app,
+            Err(_) => return log_and_error(&route_name, Error::internal("OIDC configuration")),
+        }
+    } else {
+        app
+    };
     let app = if let Ok(secret) = env.secret("WAYPOST_CURSOR_SECRET") {
         match app.with_cursor_secret(&secret.to_string()) {
             Ok(app) => app,
@@ -536,6 +558,7 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
     let mut request = Request {
         method: raw.method().to_string(),
         path: raw.path(),
+        query: raw.url()?.query().unwrap_or("").to_owned(),
         headers: raw.headers().entries().collect(),
         body: vec![],
     };

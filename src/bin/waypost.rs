@@ -115,6 +115,29 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let allow_legacy = std::env::var("WAYPOST_ALLOW_LEGACY_PLAINTEXT").is_ok_and(|v| v == "1");
     let app = app.with_encryption_keys(&keyring, allow_legacy)?;
+    let app = if let Ok(path) = std::env::var("WAYPOST_OIDC_CONFIG_FILE") {
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if !metadata.is_file() || metadata.len() > 65536 {
+            return Err("Invalid private OIDC configuration file.".into());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o077 != 0 {
+                return Err("OIDC configuration must be mode 0600.".into());
+            }
+        }
+        let raw = zeroize::Zeroizing::new(std::fs::read_to_string(path)?);
+        let config: waypost::accounts_oidc::OidcConfig =
+            serde_json::from_str(&raw).map_err(|_| "Invalid OIDC configuration.")?;
+        let exchange = waypost::accounts_oidc::OidcHttpExchange::new(&config)?;
+        let limit = std::env::var("WAYPOST_ACCOUNT_SIGNUP_LIMIT")
+            .unwrap_or_else(|_| "0".into())
+            .parse()?;
+        app.with_accounts(config, Rc::new(exchange), limit)?
+    } else {
+        app
+    };
     let app = Rc::new(app);
     if command == "init" {
         println!(

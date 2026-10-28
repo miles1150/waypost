@@ -1,0 +1,6 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "waypost",
+  "version": "0.1.0",
+  "description": "Connect to a Waypost space through a private local device credential. Experimental custom pairing; no background receiver."
+}

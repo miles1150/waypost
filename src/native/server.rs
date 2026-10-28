@@ -46,6 +46,7 @@ async fn respond(
 ) -> hyper::Response<Full<Bytes>> {
     let method = req.method().to_string();
     let path = req.uri().path().to_owned();
+    let query = req.uri().query().unwrap_or("").to_owned();
     let mut headers = BTreeMap::new();
     let mut valid = true;
     for name in req.headers().keys() {
@@ -86,6 +87,7 @@ async fn respond(
                 app.handle(Request {
                     method,
                     path,
+                    query,
                     headers,
                     body: body.to_bytes().to_vec(),
                 })

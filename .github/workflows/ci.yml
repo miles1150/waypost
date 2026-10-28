@@ -27,7 +27,7 @@ jobs:
           cache: npm
           cache-dependency-path: examples/mcp-client/package-lock.json
       - run: npm ci --prefix examples/mcp-client --ignore-scripts
-      - run: node --test tests/dashboard_ui.mjs tests/dashboard_self_service_ui.mjs
+      - run: node --test tests/dashboard_ui.mjs tests/dashboard_self_service_ui.mjs tests/account_ui.mjs
       - name: Native SDK and complete demo
         env:
           WAYPOST_ADMIN_SECRET: ci-only-admin-secret-32-bytes-long

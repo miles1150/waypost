@@ -13,6 +13,9 @@ use hmac::{Hmac, Mac};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, rc::Rc};
+mod account_devices;
+mod accounts;
+pub mod accounts_oidc;
 mod admin;
 mod blobs;
 mod dashboard;
@@ -86,6 +89,9 @@ pub struct App<D, O> {
     cursor_key: [u8; 32],
     csrf_key: [u8; 32],
     pub(crate) encryption: Option<encryption::Encryption>,
+    pub(crate) oidc: Option<accounts_oidc::OidcConfig>,
+    pub(crate) account_signup_limit: usize,
+    pub(crate) oidc_exchange: Option<Rc<dyn accounts_oidc::OidcCodeExchange>>,
 }
 // SQL execution is sealed inside this crate; callers use supported runtimes and domain HTTP/MCP operations.
 #[allow(private_bounds)]
@@ -95,6 +101,9 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             cursor_key: derive_key(&config.admin_secret, b"waypost-cursor-v2"),
             csrf_key: derive_key(&config.admin_secret, b"waypost-admin-csrf-v2"),
             encryption: None,
+            oidc: None,
+            account_signup_limit: 0,
+            oidc_exchange: None,
             db,
             objects,
             config,
@@ -120,6 +129,9 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         self
     }
     pub async fn handle(&self, request: Request) -> Response {
+        if request.path == "/account" || request.path.starts_with("/account/") {
+            return self.account_handle(&request).await;
+        }
         if let Some(response) = self.dashboard_asset(&request) {
             return response;
         }
@@ -297,7 +309,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         if p.owner_authority.is_some() {
             return self.owner_authority_guard(p);
         }
-        ("EXISTS(SELECT 1 FROM tokens t JOIN actors a ON a.space_id=t.space_id AND a.actor_id=t.actor_id JOIN consumers c ON c.space_id=t.space_id AND c.consumer_id=t.consumer_id WHERE t.token_id=? AND t.authority_version=? AND a.authority_version=? AND c.view_revision=? AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at>?) AND a.disabled=0 AND c.disabled=0)".into(),vec![p.token_id.clone().into(),p.credential_version.into(),p.actor_version.into(),p.view_revision.into(),self.clock.now_ms().into()])
+        ("EXISTS(SELECT 1 FROM tokens t JOIN actors a ON a.space_id=t.space_id AND a.actor_id=t.actor_id JOIN consumers c ON c.space_id=t.space_id AND c.consumer_id=t.consumer_id WHERE t.token_id=? AND t.authority_version=? AND a.authority_version=? AND c.view_revision=? AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at>?) AND a.disabled=0 AND c.disabled=0 AND (NOT EXISTS(SELECT 1 FROM account_devices ad WHERE ad.token_id=t.token_id) OR EXISTS(SELECT 1 FROM account_devices ad JOIN accounts ac ON ac.account_id=ad.account_id JOIN account_spaces asp ON asp.account_id=ac.account_id AND asp.space_id=ad.space_id WHERE ad.token_id=t.token_id AND ad.state='consumed' AND ac.disabled=0 AND ad.space_id=t.space_id)))".into(),vec![p.token_id.clone().into(),p.credential_version.into(),p.actor_version.into(),p.view_revision.into(),self.clock.now_ms().into()])
     }
     pub(crate) async fn current(&self, p: &Principal) -> Result<()> {
         let (guard, parameters) = self.authority_guard(p);

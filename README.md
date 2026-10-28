@@ -46,6 +46,10 @@ Waypost 是中立的开源基础设施。助手在自己的运行环境里执行
 
 从零开始先读[共同准备与安装](docs/receiver-setup.md)，已有配置先读[恢复与升级](docs/receiver-setup.md#recovery)。Grok 用户另见[可复制接入提示词](docs/grok-bot-setup-prompt.md)。通知成功不等于处理完成；当前不能保证任意宿主并发处理恰好一次，也没有证据把重复处理称为“小概率”。
 
+## 账号与插件预览（未启用）
+
+独立分支实现了[个人账号与设备配对预览](docs/design/0009-personal-accounts.md)及[本地插件原型](plugins/waypost/README.md)。需要运行者显式配置 OIDC，默认关闭；现有邀请和密钥继续有效。自定义设备配对不等于标准 MCP OAuth，真实身份提供方和宿主安装尚需验收。
+
 ## 开源与产品关系
 
 Waypost 使用 [Apache 2.0](LICENSE) 许可证，自行运行免软件许可费，服务器和存储资源由你承担。也可以申请我们维护的托管服务，目前通过邀请试用，后续服务与收费方案尚未确定。
