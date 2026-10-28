@@ -209,16 +209,9 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         if committed.is_empty() {
             return Err(Error::unauthenticated());
         }
-        let secure = if self.config.public_origin.starts_with("https://") {
-            "; Secure"
-        } else {
-            ""
-        };
         Ok((
             json!({"authenticated":true,"space_id":sid,"operator":false,"credential":credential,"csrf_token":self.csrf_token(&cookie)?,"expires_at":stamp(expires)?,"limits":self.limits}),
-            format!(
-                "waypost_admin={cookie}; Path=/admin; HttpOnly; SameSite=Strict; Max-Age=28800{secure}"
-            ),
+            super::dashboard::admin_cookie_header(&self.config.public_origin, &cookie, 28800),
         ))
     }
 }

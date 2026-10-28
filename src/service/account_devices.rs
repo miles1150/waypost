@@ -117,7 +117,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                 let cid = required(&body, "consumer_id")?;
                 crate::domain::check_id(&aid)?;
                 crate::domain::check_id(&cid)?;
-                let cookie = super::accounts::account_cookie(request)?;
+                let cookie = super::accounts::account_cookie(request, &self.config.public_origin)?;
                 let now = self.clock.now_ms();
                 let rows=self.db.batch(vec![Statement::new("UPDATE account_devices SET state='approved',account_id=?,space_id=?,actor_id=?,consumer_id=?,approved_at=? WHERE user_digest=? AND state='pending' AND expires_at>? AND EXISTS(SELECT 1 FROM account_sessions s JOIN accounts a ON a.account_id=s.account_id JOIN account_spaces m ON m.account_id=a.account_id AND m.space_id=s.selected_space_id WHERE s.session_digest=? AND s.account_id=? AND s.selected_space_id=? AND s.expires_at>? AND s.created_at>=? AND a.disabled=0) AND EXISTS(SELECT 1 FROM actors a JOIN consumers c ON c.space_id=a.space_id AND c.actor_id=a.actor_id WHERE a.space_id=? AND a.actor_id=? AND c.consumer_id=? AND a.disabled=0 AND c.disabled=0 AND c.view='inbox') RETURNING device_id",vec![account.clone().into(),sid.clone().into(),aid.into(),cid.into(),now.into(),user,now.into(),digest(&cookie),account.into(),sid.clone().into(),now.into(),(now-15*60*1000).into(),sid.into(),required(&body,"actor_id")?.into(),required(&body,"consumer_id")?.into()])]).await?;
                 if rows[0].is_empty() {
@@ -188,7 +188,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                 fields(&body, &["user_code"])?;
                 let session = self.account_session(request, true).await?;
                 let account = text(&session, "account_id")?;
-                let cookie = super::accounts::account_cookie(request)?;
+                let cookie = super::accounts::account_cookie(request, &self.config.public_origin)?;
                 let rows=self.db.batch(vec![Statement::new("UPDATE account_devices SET state='denied',account_id=? WHERE user_digest=? AND state='pending' AND expires_at>? AND EXISTS(SELECT 1 FROM account_sessions s JOIN accounts a ON a.account_id=s.account_id WHERE s.session_digest=? AND s.account_id=? AND s.expires_at>? AND a.disabled=0) RETURNING device_id",vec![account.clone().into(),user_digest(&required(&body,"user_code")?)?,now.into(),digest(&cookie),account.into(),now.into()])]).await?;
                 if rows[0].is_empty() {
                     return Err(Error::not_found());
@@ -201,7 +201,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                 let account = text(&session, "account_id")?;
                 let id = required(&body, "device_id")?;
                 crate::domain::check_id(&id)?;
-                let cookie = super::accounts::account_cookie(request)?;
+                let cookie = super::accounts::account_cookie(request, &self.config.public_origin)?;
                 let authority = "EXISTS(SELECT 1 FROM account_sessions s JOIN accounts a ON a.account_id=s.account_id WHERE s.session_digest=? AND s.account_id=? AND s.expires_at>? AND a.disabled=0)";
                 // Revocation remains possible after unlinking a Space: it only removes
                 // this account's own device credential, never grants or moves authority.
@@ -270,8 +270,16 @@ mod tests {
     fn request(app: &TestApp, path: &str) -> Request {
         let mut r = Request::json("POST", path, "", json!({}));
         r.headers.remove("authorization");
-        r.headers
-            .insert("cookie".into(), format!("waypost_account={COOKIE}"));
+        r.headers.insert(
+            "cookie".into(),
+            format!(
+                "{}={COOKIE}",
+                super::accounts::browser_cookie_name(
+                    &app.config.public_origin,
+                    super::accounts::BrowserCookie::Account
+                )
+            ),
+        );
         r.headers
             .insert("origin".into(), app.config.public_origin.clone());
         r.headers

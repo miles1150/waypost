@@ -35,13 +35,21 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             } else {
                 OwnerAuthority::Credential(digest)
             }
-        } else if super::dashboard::uses_account_session(request) {
+        } else if super::dashboard::uses_account_session(request, &self.config.public_origin) {
             OwnerAuthority::AccountSession(
-                Sha256::digest(super::accounts::account_cookie(request)?.as_bytes()).to_vec(),
+                Sha256::digest(
+                    super::accounts::account_cookie(request, &self.config.public_origin)?
+                        .as_bytes(),
+                )
+                .to_vec(),
             )
         } else {
             OwnerAuthority::Session(
-                Sha256::digest(super::dashboard::session_cookie(request)?.as_bytes()).to_vec(),
+                Sha256::digest(
+                    super::dashboard::session_cookie(request, &self.config.public_origin)?
+                        .as_bytes(),
+                )
+                .to_vec(),
             )
         };
         let rows = self.db.query(Statement::new("SELECT s.default_actor_id,s.default_consumer_id,a.authority_version,c.view_revision FROM spaces s JOIN actors a ON a.space_id=s.space_id AND a.actor_id=s.default_actor_id JOIN consumers c ON c.space_id=s.space_id AND c.consumer_id=s.default_consumer_id WHERE s.space_id=? AND a.disabled=0 AND c.disabled=0",vec![sid.into()])).await?;

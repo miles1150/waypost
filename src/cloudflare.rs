@@ -473,6 +473,10 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
             .limit(format!("ip:{}", hex::encode(Sha256::digest(ip.as_bytes()))))
             .await?;
         if !outcome.success {
+            if path.starts_with("/oauth/") {
+                log_structured(&route_name, "RATE_LIMITED", None);
+                return convert(crate::service::oauth::rate_limited_response());
+            }
             let mut response = log_and_error(
                 &route_name,
                 Error::new("RATE_LIMITED", "Request rate limit exceeded; retry later."),

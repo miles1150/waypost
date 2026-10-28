@@ -20,14 +20,15 @@ fn parameter(params: &BTreeMap<String, String>, key: &str) -> Result<String> {
         .cloned()
         .ok_or_else(|| oauth_error("invalid_request"))
 }
-fn browser_cookie(request: &Request) -> Result<String> {
+fn browser_cookie(request: &Request, origin: &str) -> Result<String> {
+    let name = super::accounts::browser_cookie_name(origin, super::accounts::BrowserCookie::OAuth);
     let values: Vec<_> = request
         .headers
         .get("cookie")
         .into_iter()
         .flat_map(|v| v.split(';'))
         .filter_map(|v| v.trim().split_once('='))
-        .filter(|(k, _)| *k == "waypost_oauth")
+        .filter(|(k, _)| *k == name)
         .map(|(_, v)| v)
         .collect();
     if values.len() != 1
@@ -195,10 +196,15 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         } else {
             ""
         };
+        let cookie_path = if secure.is_empty() { "/oauth" } else { "/" };
         response.headers.insert(
             "set-cookie".into(),
             format!(
-                "waypost_oauth={browser}; Path=/oauth; HttpOnly; SameSite=Lax; Max-Age=600{secure}"
+                "{}={browser}; Path={cookie_path}; HttpOnly; SameSite=Lax; Max-Age=600{secure}",
+                super::accounts::browser_cookie_name(
+                    &self.config.public_origin,
+                    super::accounts::BrowserCookie::OAuth
+                )
             ),
         );
         Ok(response)
@@ -252,7 +258,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         )
         .map_err(|_| oauth_error("invalid_request"))?;
         let id = required(&body, "request_id").map_err(|_| oauth_error("invalid_request"))?;
-        let browser = browser_cookie(request)?;
+        let browser = browser_cookie(request, &self.config.public_origin)?;
         let session = self.account_session(request, writing).await?;
         let now = self.clock.now_ms();
         let rows=self.db.query(Statement::new("SELECT * FROM oauth_requests WHERE request_id=? AND kind='code' AND browser_digest=? AND status='pending' AND expires_at>?",vec![id.clone().into(),digest(&browser),now.into()])).await?;
@@ -352,7 +358,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             return Err(oauth_error("access_denied"));
         }
         let account = text(session, "account_id")?;
-        let cookie = super::accounts::account_cookie(request)?;
+        let cookie = super::accounts::account_cookie(request, &self.config.public_origin)?;
         let (browser_guard, browser_args) = match browser {
             Some(d) => ("kind='code' AND browser_digest=?", vec![d]),
             None => ("kind='device'", vec![]),
@@ -459,6 +465,9 @@ mod tests {
         assert!(response.headers["location"].starts_with("/account?oauth_request="));
         assert!(response.headers["set-cookie"].contains("HttpOnly; SameSite=Lax"));
         assert!(response.headers["set-cookie"].ends_with("; Secure"));
+        assert!(response.headers["set-cookie"].starts_with("__Host-waypost_oauth="));
+        assert!(response.headers["set-cookie"].contains("; Path=/;"));
+        assert!(!response.headers["set-cookie"].contains("Domain="));
         let mut invalid = params.clone();
         invalid.insert("code_challenge_method".into(), "plain".into());
         invalid.insert(
@@ -575,18 +584,24 @@ mod tests {
         let mut request = Request::json("GET", "/oauth/consent", "", json!({}));
         request.headers.insert(
             "cookie".into(),
+            format!("__Host-waypost_oauth={}", URL_SAFE_NO_PAD.encode([1; 32])),
+        );
+        assert!(browser_cookie(&request, "https://waypost.example").is_ok());
+        request.headers.insert(
+            "cookie".into(),
             format!("waypost_oauth={}", URL_SAFE_NO_PAD.encode([1; 32])),
         );
-        assert!(browser_cookie(&request).is_ok());
+        assert!(browser_cookie(&request, "https://waypost.example").is_err());
+        assert!(browser_cookie(&request, "http://127.0.0.1:8787").is_ok());
         request.headers.insert(
             "cookie".into(),
             format!(
-                "waypost_oauth={}; waypost_oauth={}",
+                "__Host-waypost_oauth={}; __Host-waypost_oauth={}",
                 URL_SAFE_NO_PAD.encode([1; 32]),
                 URL_SAFE_NO_PAD.encode([2; 32])
             ),
         );
-        assert!(browser_cookie(&request).is_err());
+        assert!(browser_cookie(&request, "https://waypost.example").is_err());
         assert!(pkce_challenge("plain").is_err());
         assert!(pkce_challenge(&URL_SAFE_NO_PAD.encode([1; 32])).is_ok());
     }

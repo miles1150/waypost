@@ -19,6 +19,19 @@ pub struct OAuthConfig {
 pub(super) fn oauth_error(code: &'static str) -> Error {
     Error::new(code, "OAuth request could not be completed.")
 }
+/// Edge throttling happens before App dispatch, but OAuth clients still need the
+/// protocol error shape and an explicit retry delay (never the API envelope).
+#[cfg(any(test, all(feature = "cloudflare", target_arch = "wasm32")))]
+pub(crate) fn rate_limited_response() -> Response {
+    let mut response = Response::json(429, json!({"error":"temporarily_unavailable"}));
+    response
+        .headers
+        .insert("cache-control".into(), "no-store".into());
+    response.headers.insert("pragma".into(), "no-cache".into());
+    response.headers.insert("retry-after".into(), "60".into());
+    response
+}
+
 pub(super) fn parse_params(raw: &str) -> Result<BTreeMap<String, String>> {
     if raw.len() > 16384 {
         return Err(oauth_error("invalid_request"));
@@ -223,6 +236,15 @@ impl<D: Database, O: ObjectStore> App<D, O> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn edge_throttle_preserves_oauth_error_contract() {
+        let response = rate_limited_response();
+        assert_eq!(response.status, 429);
+        let body: Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(body, json!({"error":"temporarily_unavailable"}));
+        assert_eq!(response.headers["retry-after"], "60");
+        assert_eq!(response.headers["cache-control"], "no-store");
+    }
     #[test]
     fn form_parameters_reject_ambiguity() {
         for raw in [

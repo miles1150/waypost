@@ -84,7 +84,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         if request.headers.contains_key("authorization") {
             return self.admin_identity(request).await;
         }
-        if uses_account_session(request) {
+        if uses_account_session(request, &self.config.public_origin) {
             let account = self
                 .account_session(request, request.method != "GET")
                 .await?;
@@ -107,7 +107,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             }
             return Ok(Some(space));
         }
-        let cookie = session_cookie(request)?;
+        let cookie = session_cookie(request, &self.config.public_origin)?;
         let scope = self.valid_session(&cookie).await?;
         if request.method != "GET" {
             let csrf = self.csrf_token(&cookie)?;
@@ -180,16 +180,18 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             self.db.batch(vec![Statement::new("DELETE FROM admin_sessions WHERE expires_at<=?",vec![now.into()]),Statement::new("INSERT INTO admin_sessions(session_digest,admin_fingerprint,created_at,expires_at,space_id) VALUES(?,?,?,?,?)",vec![Sha256::digest(cookie.as_bytes()).to_vec().into(),Sha256::digest(secret.as_bytes()).to_vec().into(),now.into(),expires.into(),scope.clone().into()])]).await?;
             return Ok((
                 json!({"authenticated":true,"csrf_token":self.csrf_token(&cookie)?,"expires_at":stamp(expires)?,"space_id":scope,"operator":scope.is_none(),"limits":self.limits}),
-                Some(format!(
-                    "waypost_admin={cookie}; Path=/admin; HttpOnly; SameSite=Strict; Max-Age=28800{secure}"
+                Some(admin_cookie_header(
+                    &self.config.public_origin,
+                    &cookie,
+                    28800,
                 )),
             ));
         }
-        if uses_account_session(request) {
+        if uses_account_session(request, &self.config.public_origin) {
             let account = self
                 .account_session(request, request.method != "GET")
                 .await?;
-            let cookie = super::accounts::account_cookie(request)?;
+            let cookie = super::accounts::account_cookie(request, &self.config.public_origin)?;
             if request.method == "GET" {
                 let scope = self.admin_access(request).await?;
                 return Ok((
@@ -207,13 +209,17 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                 return Ok((
                     json!({"authenticated":false}),
                     Some(format!(
-                        "waypost_account=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{secure}"
+                        "{}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{secure}",
+                        super::accounts::browser_cookie_name(
+                            &self.config.public_origin,
+                            super::accounts::BrowserCookie::Account
+                        )
                     )),
                 ));
             }
             return Err(Error::not_found());
         }
-        let cookie = session_cookie(request)?;
+        let cookie = session_cookie(request, &self.config.public_origin)?;
         let scope = self.admin_access(request).await?;
         if request.method == "GET" {
             return Ok((
@@ -230,9 +236,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                 .await?;
             return Ok((
                 json!({"authenticated":false}),
-                Some(format!(
-                    "waypost_admin=; Path=/admin; HttpOnly; SameSite=Strict; Max-Age=0{secure}"
-                )),
+                Some(admin_cookie_header(&self.config.public_origin, "", 0)),
             ));
         }
         Err(Error::not_found())
@@ -538,15 +542,27 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         Ok(json!({"items":items,"has_more":more,"next_cursor":cursor}))
     }
 }
-// An explicit legacy credential/cookie always wins. An invalid legacy cookie
-// must not silently switch identities through a second account cookie.
-pub(super) fn uses_account_session(request: &Request) -> bool {
+// An explicit Bearer credential or current-origin admin cookie always wins.
+// HTTPS ignores obsolete unprefixed names, including sibling-injected cookies.
+// An invalid current admin cookie must not fall back to account authority.
+pub(super) fn admin_cookie_header(origin: &str, value: &str, max_age: u32) -> String {
+    let name = super::accounts::browser_cookie_name(origin, super::accounts::BrowserCookie::Admin);
+    let (path, secure) = if origin.starts_with("https://") {
+        ("/", "; Secure")
+    } else {
+        ("/admin", "")
+    };
+    format!("{name}={value}; Path={path}; HttpOnly; SameSite=Strict; Max-Age={max_age}{secure}")
+}
+pub(super) fn uses_account_session(request: &Request, origin: &str) -> bool {
+    let expected =
+        super::accounts::browser_cookie_name(origin, super::accounts::BrowserCookie::Admin);
     !request.headers.contains_key("authorization")
         && !request.headers.get("cookie").is_some_and(|cookies| {
             cookies.split(';').any(|part| {
                 part.trim()
                     .split_once('=')
-                    .is_some_and(|(key, _)| key == "waypost_admin")
+                    .is_some_and(|(key, _)| key == expected)
             })
         })
 }
@@ -572,27 +588,30 @@ fn account_admin_route(request: &Request) -> bool {
     )
 }
 
-pub(super) fn session_cookie(request: &Request) -> Result<String> {
-    request
+pub(super) fn session_cookie(request: &Request, origin: &str) -> Result<String> {
+    let expected =
+        super::accounts::browser_cookie_name(origin, super::accounts::BrowserCookie::Admin);
+    let values: Vec<_> = request
         .headers
         .get("cookie")
-        .and_then(|s| {
-            s.split(';').find_map(|part| {
-                let (key, value) = part.trim().split_once('=')?;
-                if key == "waypost_admin"
-                    && value.len() <= 128
-                    && value
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-                {
-                    Some(value.into())
-                } else {
-                    None
-                }
-            })
-        })
-        .ok_or_else(Error::unauthenticated)
+        .into_iter()
+        .flat_map(|s| s.split(';'))
+        .filter_map(|part| part.trim().split_once('='))
+        .filter(|(name, _)| *name == expected)
+        .map(|(_, value)| value)
+        .collect();
+    if values.len() != 1
+        || values[0].is_empty()
+        || values[0].len() > 128
+        || !values[0]
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(Error::unauthenticated());
+    }
+    Ok(values[0].into())
 }
+
 fn row_value(row: &Row) -> Value {
     Value::Object(
         row.iter()
@@ -636,18 +655,39 @@ mod account_route_tests {
     }
 
     #[test]
+    fn admin_cookie_scope_and_parser_follow_configured_origin() {
+        assert_eq!(
+            admin_cookie_header("http://127.0.0.1:8787", "test", 1),
+            "waypost_admin=test; Path=/admin; HttpOnly; SameSite=Strict; Max-Age=1"
+        );
+        assert_eq!(
+            admin_cookie_header("https://waypost.example", "test", 1),
+            "__Host-waypost_admin=test; Path=/; HttpOnly; SameSite=Strict; Max-Age=1; Secure"
+        );
+        let mut r = Request::json("GET", "/admin/session", "", json!({}));
+        r.headers
+            .insert("cookie".into(), "waypost_admin=test".into());
+        assert!(session_cookie(&r, "https://waypost.example").is_err());
+        assert_eq!(session_cookie(&r, "http://127.0.0.1:8787").unwrap(), "test");
+        r.headers.insert(
+            "cookie".into(),
+            "__Host-waypost_admin=test; __Host-waypost_admin=other".into(),
+        );
+        assert!(session_cookie(&r, "https://waypost.example").is_err());
+    }
+    #[test]
     fn explicit_legacy_identity_never_falls_back_to_account_cookie() {
         let mut request = Request::json("GET", "/admin/session", "bad", json!({}));
         request
             .headers
             .insert("cookie".into(), "waypost_account=account".into());
-        assert!(!uses_account_session(&request));
+        assert!(!uses_account_session(&request, "https://waypost.example"));
         request.headers.remove("authorization");
-        assert!(uses_account_session(&request));
+        assert!(uses_account_session(&request, "https://waypost.example"));
         request.headers.insert(
             "cookie".into(),
-            "waypost_account=account; waypost_admin=invalid!".into(),
+            "__Host-waypost_account=account; __Host-waypost_admin=invalid!".into(),
         );
-        assert!(!uses_account_session(&request));
+        assert!(!uses_account_session(&request, "https://waypost.example"));
     }
 }

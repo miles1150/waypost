@@ -4,8 +4,30 @@ use crate::json::{fields, required};
 use crate::storage::driver::optional_text;
 use accounts_oidc::{OidcCodeExchange, OidcConfig};
 
-pub(super) fn account_cookie(r: &Request) -> Result<String> {
-    cookie(r, "waypost_account")
+#[derive(Clone, Copy)]
+pub(super) enum BrowserCookie {
+    Account,
+    Login,
+    OAuth,
+    Admin,
+}
+// Cookie names depend only on the trusted configured origin, never request headers.
+// HTTPS intentionally rejects the old names: accepting them would preserve cookie
+// injection from sibling subdomains. Existing HTTPS sessions must sign in again.
+pub(super) fn browser_cookie_name(origin: &str, kind: BrowserCookie) -> &'static str {
+    match (origin.starts_with("https://"), kind) {
+        (true, BrowserCookie::Admin) => "__Host-waypost_admin",
+        (false, BrowserCookie::Admin) => "waypost_admin",
+        (true, BrowserCookie::Account) => "__Host-waypost_account",
+        (true, BrowserCookie::Login) => "__Host-waypost_login",
+        (true, BrowserCookie::OAuth) => "__Host-waypost_oauth",
+        (false, BrowserCookie::Account) => "waypost_account",
+        (false, BrowserCookie::Login) => "waypost_login",
+        (false, BrowserCookie::OAuth) => "waypost_oauth",
+    }
+}
+pub(super) fn account_cookie(r: &Request, origin: &str) -> Result<String> {
+    cookie(r, browser_cookie_name(origin, BrowserCookie::Account))
 }
 fn cookie(r: &Request, name: &str) -> Result<String> {
     let values: Vec<_> = r
@@ -83,7 +105,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         if self.oidc.is_none() {
             return Err(Error::not_found());
         }
-        let raw = account_cookie(r)?;
+        let raw = account_cookie(r, &self.config.public_origin)?;
         if require_csrf {
             if r.headers.get("origin") != Some(&self.config.public_origin) {
                 return Err(Error::forbidden());
@@ -122,6 +144,11 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         } else {
             ""
         };
+        let account_cookie_name =
+            browser_cookie_name(&self.config.public_origin, BrowserCookie::Account);
+        let login_cookie_name =
+            browser_cookie_name(&self.config.public_origin, BrowserCookie::Login);
+        let login_path = if secure.is_empty() { "/account" } else { "/" };
         let now = self.clock.now_ms();
         if r.method == "GET" && r.path == "/account" {
             let mut out = Response::json(200, json!(null));
@@ -152,7 +179,10 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             if state.len() != 43 || code.len() > 4096 {
                 return Err(Error::unauthenticated());
             }
-            let browser = cookie(r, "waypost_login")?;
+            let browser = cookie(
+                r,
+                browser_cookie_name(&self.config.public_origin, BrowserCookie::Login),
+            )?;
             // Claim before network exchange. A lost/failed exchange requires a fresh login,
             // never a replay of a possibly consumed authorization code.
             let rows = self.db.batch(vec![Statement::new("UPDATE account_login_attempts SET consumed=1 WHERE state_digest=? AND browser_digest=? AND expires_at>? AND consumed=0 RETURNING nonce,verifier",vec![digest(state),digest(&browser),now.into()])]).await?;
@@ -193,7 +223,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             }
             let mut out = Response::json(303, json!({"ok":true}));
             out.headers.insert("location".into(), "/account".into());
-            out.headers.insert("set-cookie".into(),format!("waypost_account={session}; Path=/; HttpOnly; SameSite=Lax; Max-Age=28800{secure}"));
+            out.headers.insert("set-cookie".into(),format!("{account_cookie_name}={session}; Path=/; HttpOnly; SameSite=Lax; Max-Age=28800{secure}"));
             return Ok(out);
         }
         if r.method != "GET"
@@ -228,7 +258,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                 ));
             }
             let mut out = Response::json(200, json!({"ok":true,"data":{"authorization_url":url}}));
-            out.headers.insert("set-cookie".into(),format!("waypost_login={browser}; Path=/account; HttpOnly; SameSite=Lax; Max-Age=600{secure}"));
+            out.headers.insert("set-cookie".into(),format!("{login_cookie_name}={browser}; Path={login_path}; HttpOnly; SameSite=Lax; Max-Age=600{secure}"));
             return Ok(out);
         }
         let body = if r.body.is_empty() {
@@ -305,7 +335,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             let spaces:Vec<_>=spaces.iter().map(|s| Ok(json!({"space_id":text(s,"space_id")?,"display_name":text(s,"display_name")?}))).collect::<Result<_>>()?;
             return Ok(Response::json(
                 200,
-                json!({"ok":true,"data":{"account_id":aid,"selected_space_id":optional_text(&session,"selected_space_id"),"spaces":spaces,"csrf_token":self.csrf_token(&account_cookie(r)?)?}}),
+                json!({"ok":true,"data":{"account_id":aid,"selected_space_id":optional_text(&session,"selected_space_id"),"spaces":spaces,"csrf_token":self.csrf_token(&account_cookie(r, &self.config.public_origin)?)?}}),
             ));
         }
         if r.path == "/account/session" && r.method == "DELETE" {
@@ -318,7 +348,9 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             let mut out = Response::json(200, json!({"ok":true}));
             out.headers.insert(
                 "set-cookie".into(),
-                format!("waypost_account=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{secure}"),
+                format!(
+                    "{account_cookie_name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{secure}"
+                ),
             );
             return Ok(out);
         }
@@ -614,8 +646,13 @@ mod tests {
         r.headers.remove("authorization");
         r.headers
             .insert("origin".into(), app.config.public_origin.clone());
-        r.headers
-            .insert("cookie".into(), format!("waypost_account={COOKIE}"));
+        r.headers.insert(
+            "cookie".into(),
+            format!(
+                "{}={COOKIE}",
+                browser_cookie_name(&app.config.public_origin, BrowserCookie::Account)
+            ),
+        );
         r.headers
             .insert("x-waypost-csrf".into(), app.csrf_token(COOKIE).unwrap());
         r
@@ -763,6 +800,121 @@ mod tests {
         }
     }
     #[tokio::test(flavor = "current_thread")]
+    async fn https_legacy_admin_login_rejects_injection_and_preserves_current_identity_precedence()
+    {
+        let (_d, mut app, _, sid) = fixture().await;
+        app.config.public_origin = "https://waypost.example".into();
+        let login = app
+            .handle(request(
+                &app,
+                "/admin/session",
+                json!({"admin_secret":OWNER}),
+            ))
+            .await;
+        assert_eq!(login.status, 200);
+        let header = &login.headers["set-cookie"];
+        assert!(header.starts_with("__Host-waypost_admin="));
+        assert!(header.contains("; Path=/;"));
+        assert!(header.ends_with("; Secure"));
+        assert!(!header.contains("Domain="));
+        let cookie = header.split(';').next().unwrap().to_owned();
+        let mut inspect = request(&app, "/admin/session", json!({}));
+        inspect.method = "GET".into();
+        inspect.headers.insert(
+            "cookie".into(),
+            cookie.replace("__Host-waypost_admin", "waypost_admin"),
+        );
+        assert_eq!(app.handle(inspect.clone()).await.status, 401);
+        // Old names are ignored: they cannot override a valid host-only account.
+        assert_eq!(
+            action(
+                &app,
+                "/account/spaces/claim",
+                json!({"space_id":sid,"owner_credential":OWNER})
+            )
+            .await
+            .status,
+            200
+        );
+        assert_eq!(
+            action(&app, "/account/spaces/select", json!({"space_id":sid}))
+                .await
+                .status,
+            200
+        );
+        inspect.headers.insert(
+            "cookie".into(),
+            format!(
+                "{}; __Host-waypost_account={COOKIE}",
+                cookie.replace("__Host-waypost_admin", "waypost_admin")
+            ),
+        );
+        assert_eq!(app.handle(inspect.clone()).await.status, 200);
+        inspect.headers.insert(
+            "cookie".into(),
+            format!("__Host-waypost_admin=invalid; __Host-waypost_account={COOKIE}"),
+        );
+        assert_eq!(app.handle(inspect.clone()).await.status, 401);
+        inspect.headers.insert("cookie".into(), cookie);
+        assert_eq!(app.handle(inspect.clone()).await.status, 200);
+        let body: Value = serde_json::from_slice(&login.body).unwrap();
+        inspect.method = "DELETE".into();
+        inspect.headers.insert(
+            "x-waypost-csrf".into(),
+            body["data"]["csrf_token"].as_str().unwrap().into(),
+        );
+        let out = app.handle(inspect).await;
+        assert_eq!(out.status, 200);
+        assert_eq!(
+            out.headers["set-cookie"],
+            "__Host-waypost_admin=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0; Secure"
+        );
+        assert_eq!(
+            app.admin_identity(&Request::json("GET", "/admin/v0/spaces", OWNER, json!({})))
+                .await
+                .unwrap(),
+            Some(sid)
+        );
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn https_rejects_injected_legacy_cookie_even_with_valid_owner_proof() {
+        let (_d, mut app, _, sid) = fixture().await;
+        app.config.public_origin = "https://waypost.example".into();
+        // The attacker knows their own valid session and its CSRF. A sibling
+        // domain can inject only the unprefixed name into a new victim browser.
+        let body = json!({"space_id":sid,"owner_credential":OWNER});
+        let mut injected = request(&app, "/account/spaces/claim", body.clone());
+        injected
+            .headers
+            .insert("cookie".into(), format!("waypost_account={COOKIE}"));
+        injected
+            .headers
+            .insert("x-forwarded-proto".into(), "http".into());
+        assert_eq!(app.handle(injected.clone()).await.status, 401);
+        injected.method = "GET".into();
+        injected.path = "/account/session".into();
+        assert_eq!(app.handle(injected).await.status, 401);
+        assert!(
+            app.db
+                .query(Statement::new("SELECT * FROM account_spaces", vec![]))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            action(&app, "/account/spaces/claim", body).await.status,
+            200
+        );
+        let mut logout = request(&app, "/account/session", json!({}));
+        logout.method = "DELETE".into();
+        let out = app.handle(logout).await;
+        assert_eq!(out.status, 200);
+        assert_eq!(
+            out.headers["set-cookie"],
+            "__Host-waypost_account=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0; Secure"
+        );
+    }
+    #[tokio::test(flavor = "current_thread")]
     async fn claim_requires_both_proofs_and_unlink_preserves_legacy_owner() {
         let (_d, app, _, sid) = fixture().await;
         assert_eq!(
@@ -899,9 +1051,14 @@ mod tests {
     }
     #[tokio::test(flavor = "current_thread")]
     async fn browser_code_flow_binds_state_nonce_and_consumes_callback_once() {
-        let (_d, app, exchange, _) = fixture().await;
+        let (_d, mut app, exchange, _) = fixture().await;
+        app.config.public_origin = "https://waypost.example".into();
         let start = action(&app, "/account/login", json!({})).await;
         assert_eq!(start.status, 200);
+        assert!(start.headers["set-cookie"].starts_with("__Host-waypost_login="));
+        assert!(start.headers["set-cookie"].contains("; Path=/;"));
+        assert!(start.headers["set-cookie"].ends_with("; Secure"));
+        assert!(!start.headers["set-cookie"].contains("Domain="));
         let value: Value = serde_json::from_slice(&start.body).unwrap();
         let url = url::Url::parse(value["data"]["authorization_url"].as_str().unwrap()).unwrap();
         let params: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
@@ -925,7 +1082,21 @@ mod tests {
                 .unwrap()
                 .into(),
         );
+        let mut injected = callback.clone();
+        injected.headers.insert(
+            "cookie".into(),
+            start.headers["set-cookie"]
+                .split(';')
+                .next()
+                .unwrap()
+                .replace("__Host-waypost_login", "waypost_login"),
+        );
+        assert_eq!(app.handle(injected).await.status, 401);
         let response = app.handle(callback.clone()).await;
+        assert!(response.headers["set-cookie"].starts_with("__Host-waypost_account="));
+        assert!(response.headers["set-cookie"].contains("; Path=/;"));
+        assert!(response.headers["set-cookie"].ends_with("; Secure"));
+        assert!(!response.headers["set-cookie"].contains("Domain="));
         assert_eq!(
             response.status,
             303,
@@ -1007,6 +1178,7 @@ mod tests {
             let client=reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
             let start=client.post(format!("{origin}/account/login")).header("origin",&origin).header("content-type","application/json").body("{}").send().await.unwrap();
             assert_eq!(start.status(),200);
+            assert!(start.headers()["set-cookie"].to_str().unwrap().contains("; Path=/account;"));
             let cookie=start.headers()["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_owned();
             let body:Value=serde_json::from_slice(&start.bytes().await.unwrap()).unwrap();
             let url=url::Url::parse(body["data"]["authorization_url"].as_str().unwrap()).unwrap();

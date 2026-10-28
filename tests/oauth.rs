@@ -179,6 +179,12 @@ impl Fixture {
             .await
             .unwrap();
         assert_eq!(response.status(), 303);
+        assert!(
+            response.headers()["set-cookie"]
+                .to_str()
+                .unwrap()
+                .contains("; Path=/oauth;")
+        );
         assert_eq!(response.headers()["cache-control"], "no-store");
         let cookie = response.headers()["set-cookie"].to_str().unwrap();
         assert!(cookie.contains("HttpOnly"));

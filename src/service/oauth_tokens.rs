@@ -258,7 +258,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         resource: &str,
         raw: &str,
     ) -> Result<Error> {
-        let rows=self.db.query(Statement::new("SELECT status,expires_at FROM oauth_requests WHERE kind='device' AND device_digest=? AND client_id=? AND resource=?",vec![digest(raw),client.into(),resource.into()])).await?;
+        let rows=self.db.query(Statement::new(format!("SELECT status,expires_at,({LIVE_REQUEST}) AS live FROM oauth_requests q WHERE kind='device' AND device_digest=? AND client_id=? AND resource=?"),vec![digest(raw),client.into(),resource.into()])).await?;
         let Some(row) = rows.first() else {
             return Ok(oauth_error("invalid_grant"));
         };
@@ -267,6 +267,13 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         }
         Ok(oauth_error(if text(row, "status")? == "denied" {
             "access_denied"
+        } else if matches!(text(row, "status")?.as_str(), "pending" | "approved")
+            && (text(row, "status")? == "pending" || integer(row, "live")? == 1)
+        {
+            // Another interval-eligible poll can replace our nonce while this
+            // request awaits D1. Keep the client polling; do not terminate a
+            // still-live grant. The stored next_poll_at remains authoritative.
+            "authorization_pending"
         } else {
             "invalid_grant"
         }))
@@ -293,11 +300,11 @@ impl<D: Database, O: ObjectStore> App<D, O> {
 }
 
 #[cfg(all(test, feature = "native"))]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::native::{FileStore, SqliteDb};
     use std::cell::Cell;
-    struct TestClock(Cell<i64>);
+    pub(super) struct TestClock(pub(super) Cell<i64>);
     impl Clock for TestClock {
         fn now_ms(&self) -> i64 {
             self.0.get()
@@ -315,7 +322,7 @@ mod tests {
             ("resource".into(), RESOURCE.into()),
         ])
     }
-    fn code_params() -> BTreeMap<String, String> {
+    pub(super) fn code_params() -> BTreeMap<String, String> {
         let mut p = params("authorization_code");
         p.extend([
             ("code".into(), CODE.into()),
@@ -327,7 +334,7 @@ mod tests {
         ]);
         p
     }
-    fn refresh_params(v: &Value) -> BTreeMap<String, String> {
+    pub(super) fn refresh_params(v: &Value) -> BTreeMap<String, String> {
         let mut p = params("refresh_token");
         p.insert(
             "refresh_token".into(),
@@ -335,12 +342,12 @@ mod tests {
         );
         p
     }
-    fn device_params() -> BTreeMap<String, String> {
+    pub(super) fn device_params() -> BTreeMap<String, String> {
         let mut p = params("urn:ietf:params:oauth:grant-type:device_code");
         p.insert("device_code".into(), DEVICE.into());
         p
     }
-    async fn fixture() -> (tempfile::TempDir, TestApp, Rc<TestClock>) {
+    pub(super) async fn fixture() -> (tempfile::TempDir, TestApp, Rc<TestClock>) {
         let dir = tempfile::tempdir().unwrap();
         let clock = Rc::new(TestClock(Cell::new(1_000_000)));
         let mut app = App::new(
@@ -844,3 +851,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(test, feature = "native"))]
+#[path = "oauth_token_adversarial_tests.rs"]
+mod adversarial_tests;
