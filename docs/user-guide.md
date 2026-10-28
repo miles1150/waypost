@@ -46,6 +46,8 @@ GET /admin/v0/spaces/<space_id>/tokens/<token_id>/routing
 
 ## 参与方与唤醒
 
+新电脑请从[接收配置教程](receiver-setup.md)开始，选择 Codex、webhook 或定时查询；Grok 可使用[接入提示词](grok-bot-setup-prompt.md)。
+
 Webhook Agent、既有 Codex 会话和定时运行的 Agent 使用同一种 Waypost 身份：Actor 是通信参与方，Consumer 保存独立收取回执，连接凭据确认所属空间和参与者身份。三者都能发送、收取和回复，宿主种类不改变消息协议。
 
 可选的 [waypost-bridge](../bridge/README.md) 在本机轮询信箱，把消息引用通知到配置的固定 Codex 会话或 webhook。它在 SQLite 中保存通知状态；有新记录时每 30 秒轮询，空闲时每 60 秒轮询并加入抖动，空轮询不写服务端。Webhook 路径也需要运行这个桥，Cloudflare 服务端不会自行推送。
