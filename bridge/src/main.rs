@@ -48,6 +48,8 @@ enum WakeAdapter {
         secret_file: PathBuf,
         #[serde(default)]
         allow_loopback_test: bool,
+        #[serde(default)]
+        trusted_resolved_cidrs: Vec<String>,
     },
 }
 struct Config {
@@ -120,11 +122,13 @@ fn config(path: &Path) -> Result<Config> {
                 url_file,
                 secret_file,
                 allow_loopback_test,
+                trusted_resolved_cidrs,
             }),
         ) => Adapter::Webhook(webhook::Target::new(
             url_file,
             secret_file,
             allow_loopback_test,
+            &trusted_resolved_cidrs,
             &raw.token_file,
         )?),
         _ => bail!("invalid configuration version or wake_adapter"),
@@ -933,5 +937,78 @@ printf '%s\n' '{"id":2,"result":{"thread":{"id":"12345678-1234-1234-1234-1234567
         mixed["codex_remote"] = Value::Null;
         fs::write(&path, mixed.to_string()).unwrap();
         assert!(config(&path).is_err());
+    }
+    fn private(path: &Path, contents: &str) {
+        fs::write(path, contents).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    fn webhook_config(dir: &Path, cidrs: Option<Value>) -> PathBuf {
+        let token = dir.join("token");
+        let url_file = dir.join("url");
+        let secret = dir.join("secret");
+        private(&token, "waypost-token");
+        private(&url_file, "https://hooks.example/wake");
+        private(&secret, "webhook-secret");
+        let mut adapter = json!({
+            "type": "webhook",
+            "url_file": url_file,
+            "secret_file": secret
+        });
+        if let Some(cidrs) = cidrs {
+            adapter["trusted_resolved_cidrs"] = cidrs;
+        }
+        let body = json!({
+            "config_version": 2,
+            "base_url": "https://waypost.example.com",
+            "token_file": token,
+            "state_dir": dir.join("state"),
+            "space_id": "space",
+            "actor_id": "actor",
+            "consumer_id": "consumer",
+            "wake_adapter": adapter
+        });
+        let path = dir.join("config.json");
+        private(&path, &body.to_string());
+        path
+    }
+    #[test]
+    fn webhook_trusted_resolved_cidrs_config_parses_valid_and_rejects_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let omitted = webhook_config(dir.path(), None);
+        assert!(config(&omitted).is_ok());
+        let empty = webhook_config(dir.path(), Some(json!([])));
+        assert!(config(&empty).is_ok());
+        let trusted = webhook_config(dir.path(), Some(json!(["198.18.0.0/15", "10.0.0.0/8"])));
+        assert!(config(&trusted).is_ok());
+        for bad in [
+            "0.0.0.0/0",
+            "::/0",
+            "127.0.0.0/8",
+            "127.0.0.1/32",
+            "169.254.0.0/16",
+            "169.254.169.254/32",
+            "198.18.0.1/15",
+            "198.18.0.0/99",
+            "not-a-cidr",
+        ] {
+            let path = webhook_config(dir.path(), Some(json!([bad])));
+            let Err(err) = config(&path) else {
+                panic!("accepted invalid trusted_resolved_cidrs {bad}");
+            };
+            let message = err.to_string();
+            assert!(
+                message.contains(bad) && !message.contains("{value}"),
+                "{bad}: {message}"
+            );
+        }
+        let path = webhook_config(dir.path(), Some(json!(["198.18.0.0/15", "0.0.0.0/0"])));
+        let Err(err) = config(&path) else {
+            panic!("accepted a list containing 0.0.0.0/0");
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("0.0.0.0/0") && !message.contains("{value}"),
+            "{message}"
+        );
     }
 }

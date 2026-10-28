@@ -39,7 +39,7 @@ waypost-bridge --config /absolute/path/config.json reconcile
 
 A queue attempt is recorded as `sending` before starting Codex. An interrupted attempt or a response without exactly one valid receipt is `unknown`, and is never automatically retried. `reconcile` reads the configured thread through the official Codex app-server and accepts an unknown item only when its marker appears in a user message. A missing marker does not prove non-delivery. If you have independently established the outcome, an operator can explicitly resolve one item using `reconcile ITEM_ID accepted` or `reconcile ITEM_ID pending`; the latter permits a new send and can duplicate a notification if the first attempt actually succeeded. State stores references and queue status, not message content.
 
-The GitHub Actions workflow builds and tests Linux x86-64 and macOS x86-64/ARM64 archives with SHA-256 files as workflow artifacts after bridge changes merge to main, or on manual dispatch. Archives include the source COMMIT. It does not publish a release.
+The GitHub Actions workflow builds and tests Linux x86-64 and macOS x86-64/ARM64 archives with SHA-256 files as workflow artifacts after bridge changes merge to main, or on manual dispatch. Archives include the source COMMIT. Pull requests and manual dispatch also upload a Linux x86-64 `waypost-bridge` binary, `waypost-bridge.sha256` (`sha256sum` format), and `COMMIT`. It does not publish a release.
 
 Upgrading to the space-membership model invalidates older inbox cursors (`f2`/`f3`). The server returns `CURSOR_SCOPE_CHANGED`; the bridge resets its cursor and rescans while retaining the existing item-ID delivery journal. Keep `state_dir` unchanged so previously notified messages are not delivered again. Shared memory feed entries may now appear, but the bridge records them without waking the assistant. Sealed attachments and collections are shared within the Space; inbox messages retain their recipient routing. Existing thread membership remains a conversation constraint: to contact another space member outside an existing thread, send a new message without that thread ID.
 
@@ -80,7 +80,24 @@ For a receiver implementing the generic Bearer webhook contract, use a separate 
 }
 ```
 
-Put this object in `wake_adapter` in a configuration containing `"config_version": 2` and the common service, token, state and identity fields above. Both files must be owned by the current user and private (0600). The webhook secret must differ from the Waypost token and reside in a separate file. Rotate it only for the same logical recipient; a new credential does not prove that the recipient is unchanged. The URL must be public HTTPS, without credentials, query or fragment. DNS results are checked and pinned before every delivery; redirects are disabled. If any standard HTTP, HTTPS or ALL proxy environment variable is set, delivery stops before sending, even when NO_PROXY is also set; the bridge cannot guarantee target pinning through that proxy. For local tests only, `"allow_loopback_test": true` allows literal 127/8 or ::1 HTTP targets; it does not allow private networks or DNS names.
+Put this object in `wake_adapter` in a configuration containing `"config_version": 2` and the common service, token, state and identity fields above. Both files must be owned by the current user and private (0600). The webhook secret must differ from the Waypost token and reside in a separate file. Rotate it only for the same logical recipient; a new credential does not prove that the recipient is unchanged. The URL must be public HTTPS, without credentials, query or fragment. DNS results are checked before every delivery and, unless the opt-in below applies, pinned to that lookup. Redirects are disabled. If any standard HTTP, HTTPS or ALL proxy environment variable is set, delivery stops before sending, even when NO_PROXY is also set; the bridge cannot guarantee target pinning through that proxy. For local tests only, `"allow_loopback_test": true` allows literal 127/8 or ::1 HTTP targets; it does not allow private networks or DNS names.
+
+Some egress gateways answer every DNS query with a placeholder such as `198.18.0.1` (`198.18.0.0/15`) and route the connection by hostname and SNI. That address is not public, so the default check rejects it. Operators who trust that resolver can opt in with `trusted_resolved_cidrs`:
+
+```json
+{
+  "type": "webhook",
+  "url_file": "/home/me/.config/waypost-bridge/webhook-url",
+  "secret_file": "/home/me/.config/waypost-bridge/webhook-secret",
+  "trusted_resolved_cidrs": ["198.18.0.0/15"]
+}
+```
+
+Omit the key or set `"trusted_resolved_cidrs": []` to keep today's strict behavior. Each entry is a canonical CIDR string whose base address is the network address (host bits zero). When every answer for the webhook hostname is inside the listed ranges, the bridge does not pin those placeholder addresses. It connects by hostname so the system resolver and gateway can route the flow, then resolves again at connect time and fails the delivery if any new answer falls outside the listed ranges. TLS certificate verification stays enabled for the real hostname.
+
+Only the listed ranges become acceptable. Loopback, RFC1918, link-local, CGNAT, documentation, and metadata addresses are still rejected unless that range is itself listed. A literal IP in the URL is never accepted just because it falls in a trusted range. HTTPS, the ban on userinfo, query, and fragment, disabled redirects, and the proxy-environment refusal are unchanged.
+
+The configuration refuses entries that would turn the check off: prefix length `/0` (`0.0.0.0/0`, `::/0`), and any range that overlaps unspecified `0.0.0.0/8`, loopback `127.0.0.0/8` or `::1/128`, link-local `169.254.0.0/16` or `fe80::/10` (this includes cloud metadata), IPv4 multicast and reserved `224.0.0.0/3`, IPv6 multicast `ff00::/8`, or IPv4-mapped `::ffff:0:0/96`. Skipping the pin trusts the resolver for names that land in the listed ranges: a resolver that rebinds a name to another address inside the same range is not distinguishable from the gateway's placeholder. List only the placeholder ranges the gateway actually returns. A non-empty list changes the webhook binding, so use a separate state directory. An empty or omitted list does not.
 
 The webhook receives a versioned JSON reference with `delivery_id`, Space, Actor, Consumer, item and message IDs, and an identical `Idempotency-Key` header. It receives no body or Waypost credential. A 2xx response means accepted, not processed. A timeout, redirect or any other response after an attempt becomes `unknown` and is not automatically retried. `status --items` lists pending, blocked and unknown item IDs for operator review. `reconcile` without arguments cannot inspect a generic webhook; verify the delivery independently before using `reconcile ITEM_ID accepted` or `reconcile ITEM_ID pending`.
 

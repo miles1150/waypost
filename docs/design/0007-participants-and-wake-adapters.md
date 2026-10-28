@@ -109,6 +109,19 @@ Webhook 只替换 `wake_adapter`：
 }
 ```
 
+可选字段 `trusted_resolved_cidrs` 只属于 webhook。缺省或 `[]` 时行为与未引入该字段时相同。需要信任出口网关的占位解析结果时写成：
+
+```json
+{
+  "type": "webhook",
+  "url_file": "/private/waypost/webhook-url",
+  "secret_file": "/private/waypost/webhook-secret",
+  "trusted_resolved_cidrs": ["198.18.0.0/15"]
+}
+```
+
+每项是规范 CIDR 字符串，基址必须是网络地址（主机位为 0），例如 `"198.18.0.0/15"`。安全限制见第 9 节。
+
 首期只支持固定 `Authorization: Bearer <secret>`，不提供任意 header 模板、正文模板或消息字段插值。文件必须当前用户所有、私密且普通文件；URL/secret 不进入普通日志或 status。Webhook secret 不得使用 Waypost token；它只认证通知目标，不能让 webhook 反向调用 Waypost。宿主另行配置受限的 Waypost 连接。
 
 配置加载及投递时拒绝 webhook secret 与 Waypost token 指向相同规范化文件路径或具有相同值；比较和错误信息不得打印秘密。仅依靠不同文件名不算独立凭据。
@@ -117,7 +130,7 @@ Webhook 只替换 `wake_adapter`：
 
 旧 SQLite `meta.binding` 包含 origin、Space、Actor、Consumer 和 Codex 目标的八元数组。首选兼容策略是旧／新版 Codex 配置都归一化到精确相同的旧八元数组，保留现有 metadata，不为结构拆分强制数据库迁移；Webhook 使用独立带版本的目标 binding。任何确需新增 metadata 的升级必须先验证完整旧绑定并事务性写入，不删除旧 item 状态或扫描游标。旧 `sending` 继续恢复为 unknown，accepted/unknown 不能因升级变成 pending。任何服务、参与身份、Consumer 或通知目标变化都必须失败并提示独立迁移，不能靠新建空账本自动重发历史来“修复”。
 
-公共服务身份与适配器目标在结构上分开，但状态目录仍固定到一个完整组合。首期一个 state_dir 对应一个 Consumer 和一个通知目标，不支持一条消息自动广播多个宿主。目标 URL 更改算目标变化；`allow_loopback_test` 也纳入 Webhook binding，不能对同一账本静默切换网络安全模式。secret 的原地轮换不改变逻辑目标，但下一次发送读取新 secret。每次发送校验私密 URL 的目标指纹仍与账本一致，防止 URL 文件替换把旧队列改投。
+公共服务身份与适配器目标在结构上分开，但状态目录仍固定到一个完整组合。首期一个 state_dir 对应一个 Consumer 和一个通知目标，不支持一条消息自动广播多个宿主。目标 URL 更改算目标变化；`allow_loopback_test` 也纳入 Webhook binding，不能对同一账本静默切换网络安全模式。非空 `trusted_resolved_cidrs` 同样纳入 binding（空列表或省略不改变既有指纹）；更改受信网段必须使用独立 state 目录。secret 的原地轮换不改变逻辑目标，但下一次发送读取新 secret。每次发送校验私密 URL 的目标指纹仍与账本一致，防止 URL 文件替换把旧队列改投。
 
 ## 6. 扫描、稳定标识和通知账本
 
@@ -184,8 +197,10 @@ Webhook 是本机配置的可出站目标，不从消息中获取。首期默认
 
 - 拒绝用户信息、fragment、query 和非 HTTPS；避免把 URL 当作额外 secret 通道。
 - 拒绝 loopback、private、link-local、multicast、unspecified、CGNAT、保留地址及云 metadata 地址；同时处理 IPv4、IPv6 与 IPv4-mapped IPv6。
-- DNS 每次尝试重新解析；只要任一结果不允许就拒绝，不只检查第一条。验证后的连接必须固定到该次获准 IP，HTTP Host 与 TLS SNI 保留原域名并验证证书，不能检查后再让 HTTP 库重新解析。
-- 禁止重定向。Webhook secret 只发给已固定的目标，不跟随跳转，不复用 Waypost Authorization。
+- DNS 每次尝试重新解析；只要任一结果不允许就拒绝，不只检查第一条。默认情况下，验证后的连接必须固定到该次获准 IP，HTTP Host 与 TLS SNI 保留原域名并验证证书，不能检查后再让 HTTP 库重新解析。
+- 可选 `trusted_resolved_cidrs`（JSON 字符串数组，例如 `"trusted_resolved_cidrs": ["198.18.0.0/15"]`）只放行解析结果落在所列网段内的主机名。缺省或空数组时，上述公网检查和 IP 固定保持不变。当一次解析的全部地址都在这些网段内时，不把连接固定到占位 IP，而是按主机名连接，让系统解析器和出口网关按主机名 / SNI 选路；TLS 仍校验真实主机名上的证书。连接时再次解析，任一新地址超出所列网段则失败。公网地址仍固定到当次获准 IP。公网地址与占位地址混合的应答拒绝。URL 中的字面 IP 即使落在受信网段内也拒绝。
+- 受信列表不是通用私网开关。未列入的回环、RFC1918、链路本地、CGNAT、文档网段和元数据地址仍然拒绝。配置拒绝明显危险的条目：前缀长度 0（`0.0.0.0/0`、`::/0`），以及与未指定地址 `0.0.0.0/8`、回环 `127.0.0.0/8` 或 `::1/128`、链路本地 `169.254.0.0/16` 或 `fe80::/10`（含云元数据）、IPv4 组播和保留地址 `224.0.0.0/3`、IPv6 组播 `ff00::/8`、IPv4 映射 IPv6 `::ffff:0:0/96` 重叠的网段。不固定 IP 意味着解析器若把名字重绑定到同一受信网段内的另一个地址，桥无法把它和网关占位地址区分开；只应列入网关实际返回的占位网段。HTTPS、禁止 userinfo/query/fragment、禁止重定向，以及设置了代理环境变量时拒绝发送，均不因该字段放宽。
+- 禁止重定向。Webhook secret 只发给当次地址检查通过的目标，不跟随跳转，不复用 Waypost Authorization。默认路径仍固定到获准 IP；受信占位网段按主机名连接，连接时的解析结果必须仍在所列网段内。
 - 代理不能成为绕过地址校验的通道。若当前环境强制使用 egress proxy，而其远端 DNS／CONNECT 路径无法保证连接到已验证的地址，应明确返回不支持安全目标固定，不静默关闭代理或放宽规则。托管 cloud env 的代理政策优先，不能为验收改网络设置。
 - 代理检查涵盖实际生效的 `HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY`、`NO_PROXY` 及小写形式。不能仅设置 HTTP 客户端 DNS override 就声称经代理的 CONNECT 仍固定到了获准 IP；实现必须证明实际连接路径，否则对该 webhook 调用失败关闭。
 - 使用固定请求超时、发送及响应大小界限，限制响应读取；不把 URL、secret 或远端错误消息放入日志。
