@@ -161,7 +161,7 @@ fn tools() -> Vec<Value> {
     let definitions = vec![
         (
             "waypost_describe",
-            "Inspect identity, grants, limits and supported capabilities.",
+            "Inspect Space identity, default destination, limits and supported capabilities.",
             schema(json!({}), &[]),
             true,
         ),

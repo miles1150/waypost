@@ -237,18 +237,6 @@ impl FeedFilter {
         Ok(())
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct ResourceGrants {
-    #[serde(default)]
-    pub recipient_ids: Vec<String>,
-    #[serde(default)]
-    pub memory_read_collection_ids: Vec<String>,
-    #[serde(default)]
-    pub memory_write_collection_ids: Vec<String>,
-    #[serde(default)]
-    pub blob_reference_ids: Vec<String>,
-}
 #[derive(Debug, Clone)]
 pub(crate) enum OwnerAuthority {
     Operator,
@@ -268,21 +256,6 @@ pub struct Principal {
     pub default_actor_id: String,
     pub default_recipient_id: String,
     pub view: String,
-    pub scopes: Vec<String>,
-    pub grants: ResourceGrants,
     pub filter: FeedFilter,
-    pub grant_fingerprint: String,
     pub filter_fingerprint: String,
-}
-impl Principal {
-    pub fn has(&self, scope: &str) -> bool {
-        self.scopes.iter().any(|s| s == scope)
-    }
-    pub fn require(&self, scope: &str) -> Result<()> {
-        if self.has(scope) {
-            Ok(())
-        } else {
-            Err(Error::forbidden())
-        }
-    }
 }

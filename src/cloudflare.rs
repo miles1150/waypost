@@ -235,7 +235,6 @@ impl App<D1Store, R2Store> {
             return Err(Error::forbidden());
         }
         let p = self.authenticate(request).await?;
-        p.require("blob.write")?;
         let row = self.upload(&p, id).await?;
         crate::storage::rows::Upload::decode(&row)?.writable(self.clock.now_ms())?;
         let size = integer(&row, "size_bytes")? as u64;

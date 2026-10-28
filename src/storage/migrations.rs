@@ -43,6 +43,10 @@ pub const MIGRATIONS: &[(&str, &str)] = &[
         "0011_token_permissions.sql",
         include_str!("../../migrations/0011_token_permissions.sql"),
     ),
+    (
+        "0012_space_membership.sql",
+        include_str!("../../migrations/0012_space_membership.sql"),
+    ),
 ];
 
 #[cfg(test)]

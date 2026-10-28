@@ -59,26 +59,24 @@ async fn explicit_connection_default_delivers_to_primary_without_exposing_owner_
     )
     .await;
     let consumer = call(&f.app,"POST",&format!("{root}/consumers"),ADMIN,json!({"request_id":"sender-consumer","actor_id":sender["actor_id"],"view":"inbox","filter":{}})).await;
-    let issued = call(&f.app,"POST",&format!("{root}/tokens"),ADMIN,json!({"request_id":"sender-connection","actor_id":sender["actor_id"],"consumer_id":consumer["consumer_id"],"scopes":["message.send"],"resource_grants":{"recipient_ids":[f.writer["actor_id"]]},"default_recipient_id":f.writer["actor_id"]})).await;
+    let issued = call(&f.app,"POST",&format!("{root}/tokens"),ADMIN,json!({"request_id":"sender-connection","actor_id":sender["actor_id"],"consumer_id":consumer["consumer_id"],"default_recipient_id":f.writer["actor_id"]})).await;
     let token = issued["token"].as_str().unwrap();
     let describe = call(&f.app, "GET", "/v0/describe", token, json!({})).await;
     assert_eq!(describe["default_recipient_id"], f.writer["actor_id"]);
     call(&f.app,"POST","/v0/messages",token,json!({"request_id":"handoff","kind":"info","subject":"Booking confirmed","body":{"text":"Friday, 19:00, two seats"},"metadata":{}})).await;
     assert_eq!(f.writer_inbox().await["items"].as_array().unwrap().len(), 1);
     assert!(f.inbox().await["items"].as_array().unwrap().is_empty());
-    assert_eq!(
-        raw(
-            &f.app,
-            "POST",
-            "/v0/inbox/read",
-            token,
-            json!({"consumer_id":consumer["consumer_id"]})
-        )
-        .await
-        .0,
-        403
-    );
-    assert_eq!(raw(&f.app,"POST",&format!("{root}/tokens"),ADMIN,json!({"request_id":"ungranted-default","actor_id":sender["actor_id"],"consumer_id":consumer["consumer_id"],"scopes":["message.send"],"resource_grants":{},"default_recipient_id":f.writer["actor_id"]})).await.0,400);
+    let own_inbox = call(
+        &f.app,
+        "POST",
+        "/v0/inbox/read",
+        token,
+        json!({"consumer_id":consumer["consumer_id"]}),
+    )
+    .await;
+    assert!(own_inbox["items"].as_array().unwrap().is_empty());
+    // A default destination is routing, not a grant: any active same-space Actor is valid.
+    call(&f.app,"POST",&format!("{root}/tokens"),ADMIN,json!({"request_id":"another-default","actor_id":sender["actor_id"],"consumer_id":consumer["consumer_id"],"default_recipient_id":f.writer["actor_id"]})).await;
     let old_default = call(&f.app, "GET", "/v0/describe", &f.writer_token, json!({})).await;
     assert_eq!(
         old_default["default_recipient_id"],
@@ -90,7 +88,7 @@ async fn explicit_connection_default_delivers_to_primary_without_exposing_owner_
 async fn retry_keeps_the_first_reserved_recipient_after_changing_connection_default() {
     let f = Fixture::new().await;
     let path = format!("/admin/v0/spaces/{}/tokens", f.sid());
-    let mut body = json!({"request_id":"primary-default","actor_id":f.writer["actor_id"],"consumer_id":f.writer_consumer["consumer_id"],"scopes":["message.send"],"resource_grants":{"recipient_ids":[f.writer["actor_id"],f.space["default_actor_id"]]},"default_recipient_id":f.writer["actor_id"]});
+    let mut body = json!({"request_id":"primary-default","actor_id":f.writer["actor_id"],"consumer_id":f.writer_consumer["consumer_id"],"default_recipient_id":f.writer["actor_id"]});
     let first = call(&f.app, "POST", &path, ADMIN, body.clone()).await;
     let message = json!({"request_id":"durable-default","kind":"info","subject":"Result","body":{"text":"Keep the original destination"}});
     let original = call(

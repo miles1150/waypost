@@ -154,7 +154,7 @@ PR #14（`f5415ba`）已合并自助接入状态、资料编辑、固定版本 Z
 - bridge 的 9 项故障/权限/去重测试与 strict Clippy 通过；构建 Linux x86-64 release 二进制。
 - Cloudflare dry-run、实际版本上传通过，最终 Worker 启动时间报告 2 ms；这不是请求 CPU 压测。
 - 最终线上 Dashboard 与 HTML 中引用的四个 fingerprinted JS/CSS 资源全部 HTTP 200。
-- cloud env 使用真实 HTTPS HTTP/MCP 和 D1，在独立合成 Space 执行 `scripts/verify_bridge_permissions.py`：同一 bearer 增减权限、历史读取、身份保留、自提权拒绝、CAS、相同请求重放、MCP describe/inbox 全通过。
+- cloud env 使用真实 HTTPS HTTP/MCP 和 D1，在独立合成 Space 执行旧权限模型脚本 `scripts/verify_bridge_permissions.py`（本轮已由 `scripts/verify_space_membership.py` 替换；此处保留当时验收事实）：同一 bearer 增减权限、历史读取、身份保留、自提权拒绝、CAS、相同请求重放、MCP describe/inbox 全通过。
 - 同一验收使用实际 release bridge 二进制与模拟 Codex CLI，确认仅一次通知、重启去重、空 feed、权限视图变化重扫不重复通知。
 - 修复 cloud env 实测发现的 TLS `UnknownIssuer`：bridge 改用系统 CA 根，支持 `SSL_CERT_FILE`/`SSL_CERT_DIR`，始终保留证书验证。随后两次真实 HTTPS 空轮询以及完整集成验收通过。
 - 完整验收曾遇到一次网络 URLError，后续完整重跑通过；不将该失败计作通过。
@@ -179,3 +179,18 @@ PR #14（`f5415ba`）已合并自助接入状态、资料编辑、固定版本 Z
 [本地集成脚本](../scripts/verify_participant_flows.py) 使用真实 native Waypost HTTP/MCP、临时 SQLite 与独立只读桥凭据，9 种参与方路由、13 项检查通过，并由非实现者独立复跑。覆盖持久保存后 ACK、稳定发送与 ACK 的丢响应恢复、定时处理者重新打开账本后不重复业务、回执不触发通知循环、webhook 接收后断连接进入 unknown 且重启不重发、显式重试保留 delivery_id、待通知记录撤权与恢复。通知和空轮询前后服务端所有应用表内容摘要相同。模拟业务只计算消息字符数，不能当作真实模型或外部动作完成。详细测试与局限见[验收报告](reviews/2026-10-28-participant-acceptance.md)。
 
 Grok 官方文档已实际读取并记录于[调研](reviews/2026-10-28-grok-routines-research.md)：Grok Bot routine 支持 Bearer webhook 和定时执行，Grok.com Automations 使用另一签名协议，当前适配器不实现后者。未创建 routine 或调用真实 Grok webhook，未验证真实 Codex 会话、公网 webhook TLS、真实 DNS 重绑定、断电恢复或 Cloudflare 计费。当前 cloud env 依赖代理，公网 webhook 会按设计拒绝发送，不通过关闭代理来验收。GitHub Actions 已加入本地集成脚本，但未运行 hosted workflow。
+
+## 空间成员模型（2026-10-28，本地实现，未部署）
+
+按用户确认删除连接级消息、资料和附件授权，保留 Space 和管理边界；设计见 [0008](design/0008-space-membership.md)。独立 review 检查运行时已无旧授权表查询，并补管理身份撤销/会话竞争测试。迁移删除旧表会使旧 Worker 不兼容，部署说明已改为备份、停流维护、匹配版本部署与成对恢复；本轮没有执行生产迁移或发布。
+
+验证记录：
+- Rust 全量首轮 60 项通过、2 项旧附件保密预期失败；按新的空间共享语义修正后，附件、隐私、空间成员和路由定向 11 项通过。后续新增路由测试使 routing 共 5 项通过。
+- 管理事务边界的并发 CAS、owner 凭据撤销、密钥轮换/session logout：3 项测试通过。
+- 旧 f2/f3/m1 游标迁移与重扫：2 项通过。填充了凭据、到期/撤销、资料、附件、回执及审计的 schema-11 数据库升级：1 项 Python 测试通过，四张授权表消失而保留数据逐行一致。
+- Dashboard jsdom：16 项通过。Python 全套 unittest：16 项通过（含 Consumer 7 项及备份/恢复、部署验证、旧库迁移），包括旧账本拒绝静默迁移且保留待处理和游标。
+- `verify_space_membership.py` 使用真实 native HTTP/MCP、SQLite 和实际 bridge binary 验证无白名单双向收发、路由CAS/重放、管理隔离、Consumer绑定、撤销和重启去重。Codex CLI 为模拟。
+- `verify_participant_flows.py` 使用真实 native HTTP/MCP 与临时 SQLite，9 种参与方收发组合、13 项检查通过；包括丢失发送/ACK响应恢复、webhook unknown不重发、路由变化保留游标、撤销阻止pending以及同身份替换凭据恢复。Webhook/Codex执行端为模拟。
+- Native all-targets 与 Cloudflare wasm32 strict Clippy、格式和 diff 检查通过；修复了只在 Worker streaming upload 路径残留的旧scope检查。未声称运行了本轮生产 D1/R2、真实 Grok routine或真实 Codex会话验收。
+
+空间内封存附件现在共享：发布过滤生成的脱敏副本不会阻止同空间成员凭原blob ID读取原件。隐私测试继续验证发布副本脱敏，不再错误声称原件对空间成员隔离。

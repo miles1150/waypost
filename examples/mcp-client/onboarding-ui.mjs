@@ -55,7 +55,7 @@ try{
  p.querySelector('#close-detail').click();await new Promise(r=>setTimeout(r,200));p.querySelector('[data-tab=agents]').click();await wait(()=>p.querySelector('[data-action=choose-primary]'));
  p.querySelector('[data-action=choose-primary]').click();await wait(()=>p.querySelector('[data-action=confirm-primary]'));p.querySelector('[data-action=confirm-primary]').click();
  await wait(()=>p.querySelector('.connection-form'));const form=p.querySelector('.connection-form');
- const choices=[...form.querySelector('fieldset .checks').querySelectorAll('input')];assert.equal(choices.filter(i=>i.checked).length,3);
+ assert.equal(form.querySelector('fieldset'),null);
  submit(form);await wait(()=>p.querySelector('#detail-body pre'));
  const primaryInfo=JSON.parse(p.querySelector('#detail-body pre').textContent);p.querySelector('#close-detail').click();
  await new Promise(r=>setTimeout(r,200));p.querySelector('#add-agent').click();await wait(()=>p.querySelector('#detail-body form input'));

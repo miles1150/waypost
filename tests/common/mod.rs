@@ -52,8 +52,8 @@ impl Fixture {
         )
         .await;
         let writer_consumer=call(&app,"POST",&format!("/admin/v0/spaces/{sid}/consumers"),ADMIN,json!({"request_id":"setup-writer-consumer","actor_id":writer["actor_id"],"view":"inbox","filter":{}})).await;
-        let token=call(&app,"POST",&format!("/admin/v0/spaces/{sid}/tokens"),ADMIN,json!({"request_id":"setup-writer-token","actor_id":writer["actor_id"],"consumer_id":writer_consumer["consumer_id"],"scopes":["message.send","message.read","receipt.write","blob.write","memory.read","memory.write"],"resource_grants":{}})).await;
-        let reader=call(&app,"POST",&format!("/admin/v0/spaces/{sid}/tokens"),ADMIN,json!({"request_id":"setup-reader-token","actor_id":space["default_actor_id"],"consumer_id":space["default_consumer_id"],"scopes":["message.send","message.read","receipt.write","memory.read"],"resource_grants":{"recipient_ids":[writer["actor_id"]]}})).await;
+        let token=call(&app,"POST",&format!("/admin/v0/spaces/{sid}/tokens"),ADMIN,json!({"request_id":"setup-writer-token","actor_id":writer["actor_id"],"consumer_id":writer_consumer["consumer_id"]})).await;
+        let reader=call(&app,"POST",&format!("/admin/v0/spaces/{sid}/tokens"),ADMIN,json!({"request_id":"setup-reader-token","actor_id":space["default_actor_id"],"consumer_id":space["default_consumer_id"]})).await;
         Self {
             dir,
             app,

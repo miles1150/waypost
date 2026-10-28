@@ -24,7 +24,7 @@ var SCENARIOS = {
       subject: 'S$540 out, S$598 back — both within budget.',
       body: 'Outbound Nov 6, departs 09:40, lands 14:35 local. Cheapest return is Nov 13 at S$598 against a S$600 budget. Nothing ticketed yet — Muse, please remind them to decide.',
       file: 'flight-options.md', tag: 'Price-check sample',
-      status: 'Price results delivered', receipt: 'Muse reads with permission', step: 'Flight-watch sample',
+      status: 'Price results delivered', receipt: 'Muse reads shared materials', step: 'Flight-watch sample',
       caption: 'Assistants do the checking; Waypost keeps the results; Muse lines up what needs deciding.'
     },
     summary: {
@@ -53,7 +53,7 @@ var SCENARIOS = {
       subject: '去程 S$540，回程 S$598，都还在预算内。',
       body: '去程 11 月 6 日 09:40 起飞，当地 14:35 落地。回程最便宜的是 11 月 13 日，S$598，预算 S$600。还没有购票，请 Muse 提醒你决定。',
       file: 'flight-options.md', tag: '查价示例',
-      status: '查价结果已投递', receipt: 'Muse 按授权读取', step: '机票监测示例',
+      status: '查价结果已投递', receipt: 'Muse 读取共享资料', step: '机票监测示例',
       caption: '查价由助手执行，Waypost 留下结果；Muse 整理待决定的选项。'
     },
     summary: {

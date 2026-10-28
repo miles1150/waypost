@@ -17,7 +17,7 @@ async function call(path,body,token=admin,method='POST') {
 const space=await call('/admin/v0/spaces',{request_id:prefix+'-space',display_name:'Self-service integration'}),root='/admin/v0/spaces/'+space.space_id;
 const actor=await call(root+'/actors',{request_id:prefix+'-actor',display_name:'Fixture producer',kind:'agent'});
 const consumer=await call(root+'/consumers',{request_id:prefix+'-consumer',actor_id:actor.actor_id,view:'inbox',filter:{}});
-const source=await call(root+'/tokens',{request_id:prefix+'-token',actor_id:actor.actor_id,consumer_id:consumer.consumer_id,scopes:['message.send','blob.write','memory.read','memory.write'],resource_grants:{}});
+const source=await call(root+'/tokens',{request_id:prefix+'-token',actor_id:actor.actor_id,consumer_id:consumer.consumer_id});
 const collection=await call(root+'/collections',{request_id:prefix+'-collection',source_actor_id:actor.actor_id,scope:'trial',display_name:'Travel preferences'});
 const contents=[Buffer.from('Budget: S$600.\n'),Buffer.from([0,255,13,10,128]),Buffer.from('Keep the original filename as metadata.\n')],items=[];
 for(const [index,bytes] of contents.entries()) {

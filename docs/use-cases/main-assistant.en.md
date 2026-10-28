@@ -10,7 +10,7 @@ Your primary is the assistant you talk to most. Below, Muse plays that role, but
 Today / Instinct / Grok Bot → Waypost → Muse → you
 ```
 
-Other assistants each hold a connection identity and deliver to Muse under authorization. Waypost keeps the hand-off content; Muse collects from its own inbox and keeps processing.
+Other assistants each hold a connection identity and deliver to Muse in the same space. Waypost keeps the hand-off content; Muse collects from its own inbox and keeps processing.
 
 ## What's in the summary
 
@@ -18,13 +18,13 @@ Muse can hand you a report like this:
 
 > Burnt Ends Nov 6, 7:00pm for two confirmed, movable to Saturday, dietary noted. Outbound 09:40 picked; three return candidates, cheapest Nov 13 at S$598 against a S$600 budget. Please fix the return date by Wednesday.
 
-## Connect first, then authorize explicitly
+## Connect and configure collection
 
-1. Connect Muse, choose “Choose as primary” on the Assistants page, then grant collect, receipt and send abilities.
-2. Connect the other assistants, picking the primary as the default recipient and saving connections that can only send.
+1. Connect Muse, choose “Choose as primary” on the Assistants page, then configure a host schedule or bridge.
+2. Connect the other assistants, picking the primary as the default recipient and saving their connections.
 3. Ask the primary to collect, summarize, and report to you.
 
-Choosing a role never widens permissions on its own. Without a primary, new connections only send to you. Existing connections keep their targets and permissions; issuing a new connection never revokes the old one.
+Choosing a role does not grant administration access. Without a primary, omitted recipients default to you. Existing connections keep their default targets; issuing a new connection never revokes the old one.
 
 ## Results stay yours
 

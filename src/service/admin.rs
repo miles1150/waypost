@@ -144,8 +144,8 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             let sid = parts[3];
             check_id(sid)?;
             self.admin_space(sid).await?;
-            if parts.len() == 7 && parts[4] == "tokens" && parts[6] == "permissions" {
-                return self.token_permissions(request, sid, parts[5], body).await;
+            if parts.len() == 7 && parts[4] == "tokens" && parts[6] == "routing" {
+                return self.token_routing(request, sid, parts[5], body).await;
             }
             if request.method == "GET" && parts.len() == 5 && parts[4] == "connection-status" {
                 return self.connection_status(sid).await;
@@ -380,8 +380,6 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                         "request_id",
                         "actor_id",
                         "consumer_id",
-                        "scopes",
-                        "resource_grants",
                         "expires_at",
                         "default_recipient_id",
                     ],
@@ -396,89 +394,11 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                 if c["actor_id"] != actor {
                     return Err(Error::invalid("Consumer belongs to another actor."));
                 }
-                let mut scopes: Vec<String> = crate::json::decode(
-                    body.get("scopes")
-                        .cloned()
-                        .ok_or_else(|| Error::invalid("Missing scopes."))?,
-                )?;
-                if scopes.iter().any(|s| {
-                    ![
-                        "message.send",
-                        "message.read",
-                        "space.observe",
-                        "receipt.write",
-                        "memory.write",
-                        "memory.read",
-                        "blob.write",
-                        "blob.reference",
-                        "event.subscribe",
-                    ]
-                    .contains(&s.as_str())
-                }) {
-                    return Err(Error::invalid("Unknown scope."));
-                }
-                scopes.sort();
-                scopes.dedup();
-                let mut grants: ResourceGrants =
-                    crate::json::decode(body.get("resource_grants").cloned().unwrap_or(json!({})))?;
-                for list in [
-                    &mut grants.recipient_ids,
-                    &mut grants.memory_read_collection_ids,
-                    &mut grants.memory_write_collection_ids,
-                    &mut grants.blob_reference_ids,
-                ] {
-                    for id in list.iter() {
-                        check_id(id)?;
-                    }
-                    list.sort();
-                    list.dedup();
-                    if list.len() > 64 {
-                        return Err(Error::new("RESOURCE_LIMIT", "Too many grants."));
-                    }
-                }
-                for recipient in &grants.recipient_ids {
-                    self.admin_actor(sid, recipient).await?;
-                }
-                for id in grants
-                    .memory_read_collection_ids
-                    .iter()
-                    .chain(grants.memory_write_collection_ids.iter())
-                {
-                    self.admin_collection(sid, id).await?;
-                }
-                for id in &grants.blob_reference_ids {
-                    if self
-                        .db
-                        .query(Statement::new(
-                            "SELECT 1 AS valid FROM blobs WHERE space_id=? AND blob_id=?",
-                            vec![sid.into(), id.clone().into()],
-                        ))
-                        .await?
-                        .is_empty()
-                    {
-                        return Err(Error::not_found());
-                    }
-                }
                 let default_recipient = match body.get("default_recipient_id") {
                     None | Some(Value::Null) => None,
                     Some(Value::String(id)) => {
                         check_id(id)?;
                         self.admin_actor(sid, id).await?;
-                        let allowed = if grants.recipient_ids.is_empty() {
-                            vec![
-                                self.admin_space(sid).await?["default_actor_id"]
-                                    .as_str()
-                                    .ok_or_else(Error::storage)?
-                                    .to_owned(),
-                            ]
-                        } else {
-                            grants.recipient_ids.clone()
-                        };
-                        if !allowed.contains(id) {
-                            return Err(Error::invalid(
-                                "Default recipient must be explicitly authorized.",
-                            ));
-                        }
                         Some(id.clone())
                     }
                     _ => return Err(Error::invalid("Invalid default recipient.")),
@@ -530,48 +450,6 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                         default_recipient.into(),
                     ]],
                     Some(guard.clone()),
-                ));
-                q.extend(push_rows(
-                    "token_scopes",
-                    "token_id,scope",
-                    scopes
-                        .into_iter()
-                        .map(|s| vec![tid.clone().into(), s.into()])
-                        .collect(),
-                    Some(guard.clone()),
-                ));
-                q.extend(push_rows(
-                    "token_recipients",
-                    "token_id,space_id,actor_id",
-                    grants
-                        .recipient_ids
-                        .into_iter()
-                        .map(|id| vec![tid.clone().into(), sid.into(), id.into()])
-                        .collect(),
-                    Some(guard.clone()),
-                ));
-                q.extend(push_rows(
-                    "token_collections",
-                    "token_id,space_id,collection_id,action",
-                    grants
-                        .memory_read_collection_ids
-                        .into_iter()
-                        .map(|id| vec![tid.clone().into(), sid.into(), id.into(), "read".into()])
-                        .chain(grants.memory_write_collection_ids.into_iter().map(|id| {
-                            vec![tid.clone().into(), sid.into(), id.into(), "write".into()]
-                        }))
-                        .collect(),
-                    Some(guard.clone()),
-                ));
-                q.extend(push_rows(
-                    "token_blob_grants",
-                    "token_id,space_id,blob_id",
-                    grants
-                        .blob_reference_ids
-                        .into_iter()
-                        .map(|id| vec![tid.clone().into(), sid.into(), id.into()])
-                        .collect(),
-                    Some(guard),
                 ));
                 self.db.batch(q).await?;
                 let row = self

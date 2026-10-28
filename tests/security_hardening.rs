@@ -426,7 +426,7 @@ async fn feed_positions_do_not_disclose_other_spaces_traffic() {
         json!({"request_id":"other-space","display_name":"Other"}),
     )
     .await;
-    let token=call(&f.app,"POST",&format!("/admin/v0/spaces/{}/tokens",other["space_id"].as_str().unwrap()),ADMIN,json!({"request_id":"other-token","actor_id":other["default_actor_id"],"consumer_id":other["default_consumer_id"],"scopes":["message.send"],"resource_grants":{}})).await;
+    let token=call(&f.app,"POST",&format!("/admin/v0/spaces/{}/tokens",other["space_id"].as_str().unwrap()),ADMIN,json!({"request_id":"other-token","actor_id":other["default_actor_id"],"consumer_id":other["default_consumer_id"]})).await;
     call(
         &f.app,
         "POST",

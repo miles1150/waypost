@@ -27,14 +27,13 @@ def setup(url, admin):
     collection = control.request('POST', root + '/collections', {'request_id': prefix + '-collection', 'source_actor_id': muse['actor_id'], 'display_name': 'Portable decisions', 'scope': 'project/trial'})
     cid = collection['collection_id']
 
-    def credential(key, actor, consumer, scopes, grants):
-        token = control.request('POST', root + '/tokens', {'request_id': prefix + '-' + key, 'actor_id': actor, 'consumer_id': consumer, 'scopes': scopes, 'resource_grants': grants})
+    def credential(key, actor, consumer):
+        token = control.request('POST', root + '/tokens', {'request_id': prefix + '-' + key, 'actor_id': actor, 'consumer_id': consumer})
         return Client(url, token['token'])
 
-    scopes = ['message.send', 'message.read', 'receipt.write', 'memory.read']
-    source = credential('muse-token', muse['actor_id'], muse_consumer['consumer_id'], scopes + ['memory.write', 'blob.write'], {})
-    target = credential('instict-token', instict['actor_id'], instict_consumer['consumer_id'], scopes, {'memory_read_collection_ids': [cid]})
-    owner = credential('owner-token', space['default_actor_id'], space['default_consumer_id'], scopes, {'recipient_ids': [muse['actor_id'], instict['actor_id']], 'memory_read_collection_ids': [cid]})
+    source = credential('muse-token', muse['actor_id'], muse_consumer['consumer_id'])
+    target = credential('instict-token', instict['actor_id'], instict_consumer['consumer_id'])
+    owner = credential('owner-token', space['default_actor_id'], space['default_consumer_id'])
     control.request('PUT', root + '/privacy', {'expected_revision': 0, 'enabled': True, 'mode': 'redact', 'all_agents': True, 'actor_ids': [], 'allow_uninspected_attachments': False, 'rules': [{'kind': 'email'}, {'kind': 'credential'}, {'kind': 'metadata_key', 'value': 'password'}]})
     return {'prefix': prefix, 'space': space, 'muse': muse, 'instict': instict, 'collection': collection, 'source': source, 'target': target, 'owner': owner}
 

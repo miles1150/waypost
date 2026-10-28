@@ -178,110 +178,48 @@ test('a corrupted original file prevents export instead of downloading an incomp
  }finally{w.close();}
 });
 
-function permissionFixture(overrides = {}) {
-  return {token_id:'token-one', actor_id:'agent-one', consumer_id:'consumer-one', authority_version:4,
-    scopes:['message.send','blob.reference'], resource_grants:{recipient_ids:[],memory_read_collection_ids:[],memory_write_collection_ids:[],blob_reference_ids:['blob-kept']},
-    default_recipient_id:null, expires_at:null, revoked_at:null, editable:true, ...overrides};
-}
-async function openPermissionEditor(d) {
-  await wait(()=>!d.querySelector('#app').hidden&&d.querySelector('#content').children.length);
-  d.querySelector('[data-tab=tokens]').click();await wait(()=>d.querySelector('[data-action=edit-permissions]'));
-  d.querySelector('[data-action=edit-permissions]').click();await wait(()=>d.querySelector('[data-permission-editor]'));
-}
-function selectReadPermission(w,d) {
-  const input=d.querySelector('[data-permission-field=scopes][value="message.read"]');
-  input.checked=true;input.dispatchEvent(new w.Event('change'));
-  d.querySelector('[data-permission-review]').click();
-}
-
-test('permission editor preserves original connection and all existing grants, and requires review before saving', async()=>{
-  const puts=[];let current=permissionFixture();
+test('connection management has routing and revocation without a permission editor', async()=>{
+  const token={token_id:'token-one',actor_id:'agent-one',consumer_id:'consumer-one',authority_version:4,default_recipient_id:null,expires_at:null,revoked_at:null};
+  const writes=[];
   const {w,d}=await dashboard((path,body,options)=>{
-    if(path.endsWith('/permissions')) {
-      if(options.method==='PUT'){puts.push(body);current={...current,...body,authority_version:5};}
-      return current;
+    if(path.endsWith('/routing')) {
+      if(options.method==='PUT'){writes.push(body);return {...token,...body,authority_version:5,editable:true};}
+      return {...token,editable:true};
     }
-    if(path.endsWith('/inspect')&&body.kind==='tokens')return {items:[current],has_more:false};
+    if(path.endsWith('/inspect')&&body.kind==='tokens')return {items:[token],has_more:false};
     return null;
   });
   try {
-    await openPermissionEditor(d);selectReadPermission(w,d);
-    await wait(()=>d.querySelector('[data-action=permission-save]'));
-    assert.equal(puts.length,0,'Review must not perform the write.');
-    assert.equal(d.querySelector('[data-permission-field=blob_reference_ids]').value,'blob-kept');
-    d.querySelector('[data-action=permission-save]').click();await wait(()=>puts.length===1&&d.querySelector('#detail-body').textContent.includes('权限已保存'));
-    assert.deepEqual(puts[0].scopes,['blob.reference','message.read','message.send']);
-    assert.deepEqual(puts[0].resource_grants,{recipient_ids:[],memory_read_collection_ids:[],memory_write_collection_ids:[],blob_reference_ids:['blob-kept']});
-    assert.equal(puts[0].expected_authority_version,4);assert.equal(puts[0].default_recipient_id,null);
-    assert(puts[0].request_id);assert(!('actor_id' in puts[0]));assert(!('consumer_id' in puts[0]));
+    await wait(()=>!d.querySelector('#app').hidden&&d.querySelector('#content').children.length);
+    d.querySelector('[data-tab=tokens]').click();await wait(()=>d.querySelector('[data-action=edit-routing]'));
+    assert.equal(d.querySelector('[data-action=edit-permissions]'),null);
+    d.querySelector('[data-action=edit-routing]').click();await wait(()=>d.querySelector('#detail-body form select'));
+    const select=d.querySelector('#detail-body form select');select.value='agent-one';
+    d.querySelector('#detail-body form').dispatchEvent(new w.Event('submit',{cancelable:true}));
+    await wait(()=>writes.length===1&&d.querySelector('#detail-body').textContent.includes('默认收件人已保存'));
+    assert.equal(writes[0].default_recipient_id,'agent-one');
+    assert.equal(writes[0].expected_authority_version,4);
+    assert.deepEqual(Object.keys(writes[0]).sort(),['default_recipient_id','expected_authority_version','request_id']);
   } finally {w.close();}
 });
 
-test('permission conflict keeps the draft and requires explicit comparison before retrying against a new version', async()=>{
-  let current=permissionFixture(),first=true;const puts=[];
+test('new connection issuance sends identity and routing without scopes or resource grants',async()=>{
+  const writes=[];
   const {w,d}=await dashboard((path,body,options)=>{
-    if(path.endsWith('/permissions')) {
-      if(options.method==='PUT') {
-        puts.push(body);
-        if(first){first=false;current=permissionFixture({authority_version:5,scopes:['message.send','blob.reference','receipt.write']});return Response.json({ok:false,error:{code:'REVISION_CONFLICT',message:'Changed.'}},{status:409});}
-        current={...current,...body,authority_version:6};
-      }
-      return current;
-    }
-    if(path.endsWith('/inspect')&&body.kind==='tokens')return {items:[current],has_more:false};
+    if(path==='/admin/v0/registry'&&body.kind==='consumers')return {items:[{consumer_id:'consumer-one',actor_id:'agent-one',disabled:false}],has_more:false};
+    if(path.endsWith('/tokens')&&options.method==='POST'){writes.push(body);return {token_id:'token-new',token:'test-private-value'};}
     return null;
   });
   try {
-    await openPermissionEditor(d);selectReadPermission(w,d);await wait(()=>d.querySelector('[data-action=permission-save]'));
-    d.querySelector('[data-action=permission-save]').click();await wait(()=>d.querySelector('[data-action=permission-use-latest]'));
-    assert.equal(d.querySelector('[data-permission-field=scopes][value="message.read"]').checked,true);
-    assert.equal(d.querySelector('[data-permission-field=scopes][value="receipt.write"]').checked,false,'Do not silently alter the retained draft.');
-    assert.equal(puts.length,1);assert.equal(d.querySelector('[data-action=permission-save]'),null);
-    d.querySelector('[data-action=permission-use-latest]').click();
-    d.querySelector('[data-permission-review]').click();await wait(()=>d.querySelector('[data-action=permission-save]'));
-    d.querySelector('[data-action=permission-save]').click();await wait(()=>puts.length===2);
-    assert.equal(puts[1].expected_authority_version,5);assert.notEqual(puts[1].request_id,puts[0].request_id);
-  } finally {w.close();}
-});
-
-test('permission save retries use the same request ID and keep the form locked while pending', async()=>{
-  let current=permissionFixture(),release,attempts=[];
-  const {w,d}=await dashboard((path,body,options)=>{
-    if(path.endsWith('/permissions')) {
-      if(options.method==='PUT'){attempts.push(body);return new Promise(resolve=>{release=resolve;});}
-      return current;
-    }
-    if(path.endsWith('/inspect')&&body.kind==='tokens')return {items:[current],has_more:false};
-    return null;
-  });
-  try {
-    await openPermissionEditor(d);selectReadPermission(w,d);await wait(()=>d.querySelector('[data-action=permission-save]'));
-    const save=d.querySelector('[data-action=permission-save]');save.click();await wait(()=>release);
-    assert([...d.querySelectorAll('[data-permission-field]')].every(input=>input.disabled));
-    release(Response.json({ok:false,error:{code:'STORAGE_UNAVAILABLE',message:'Try again.'}},{status:503}));
-    await wait(()=>!save.disabled&&d.querySelector('#detail-error').textContent.includes('Try again.'));
-    assert.equal(d.querySelector('[data-permission-field=scopes][value="message.read"]').checked,true);
-    save.click();await wait(()=>attempts.length===2);
-    assert.equal(attempts[0].request_id,attempts[1].request_id);
-    release({...current,...attempts[1],authority_version:5});
-    await wait(()=>d.querySelector('#detail-body').textContent.includes('权限已保存'));
-  } finally {w.close();}
-});
-
-test('a connection revoked during permission review cannot be re-enabled after conflict refresh', async()=>{
-  let current=permissionFixture();
-  const {w,d}=await dashboard((path,body,options)=>{
-    if(path.endsWith('/permissions')) {
-      if(options.method==='PUT'){current=permissionFixture({revoked_at:'2026-10-28T01:00:00Z',editable:false,authority_version:5});return Response.json({ok:false,error:{code:'REVISION_CONFLICT',message:'Changed.'}},{status:409});}
-      return current;
-    }
-    if(path.endsWith('/inspect')&&body.kind==='tokens')return {items:[current],has_more:false};
-    return null;
-  });
-  try {
-    await openPermissionEditor(d);selectReadPermission(w,d);await wait(()=>d.querySelector('[data-action=permission-save]'));
-    d.querySelector('[data-action=permission-save]').click();await wait(()=>d.querySelector('#detail-body').textContent.includes('已无法修改'));
-    assert.equal(d.querySelector('[data-permission-review]').disabled,true);
-    assert([...d.querySelectorAll('[data-permission-field]')].every(input=>input.disabled));
-  } finally {w.close();}
+    await wait(()=>!d.querySelector('#app').hidden&&d.querySelector('#content').children.length);
+    d.querySelector('[data-tab=agents]').click();await wait(()=>d.querySelector('[data-action=manage-connections]'));
+    d.querySelector('[data-action=manage-connections]').click();await wait(()=>d.querySelector('.connection-form'));
+    const form=d.querySelector('.connection-form');
+    assert.equal(form.querySelector('fieldset'),null);
+    form.dispatchEvent(new w.Event('submit',{cancelable:true}));
+    await wait(()=>writes.length===1&&d.querySelector('#detail-body').textContent.includes('test-private-value'));
+    assert.equal(writes[0].actor_id,'agent-one');assert.equal(writes[0].consumer_id,'consumer-one');
+    assert(!('scopes' in writes[0]));assert(!('resource_grants' in writes[0]));
+    await new Promise(resolve=>setTimeout(resolve,50));
+  }finally{w.close();}
 });

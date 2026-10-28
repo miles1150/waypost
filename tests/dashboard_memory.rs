@@ -85,7 +85,7 @@ async fn final_edit_cannot_bind_another_actors_or_spaces_blob_or_invalid_text_by
     assert_eq!(error["error"]["code"], "FORBIDDEN");
     // Explicit fixture tokens exercise the existing public upload protocol. The
     // Dashboard implementation itself never creates or returns an Agent token.
-    let owner_token=call(&f.app,"POST",&format!("/admin/v0/spaces/{}/tokens",f.sid()),&credential,json!({"request_id":"fixture-owner-upload","actor_id":f.space["default_actor_id"],"consumer_id":f.space["default_consumer_id"],"scopes":["blob.write"],"resource_grants":{}})).await;
+    let owner_token=call(&f.app,"POST",&format!("/admin/v0/spaces/{}/tokens",f.sid()),&credential,json!({"request_id":"fixture-owner-upload","actor_id":f.space["default_actor_id"],"consumer_id":f.space["default_consumer_id"]})).await;
     let token = owner_token["token"].as_str().unwrap();
     let binary = upload_as(
         &f,
@@ -124,7 +124,7 @@ async fn final_edit_cannot_bind_another_actors_or_spaces_blob_or_invalid_text_by
         json!({"request_id":"foreign-space","display_name":"Foreign"}),
     )
     .await;
-    let other_token=call(&f.app,"POST",&format!("/admin/v0/spaces/{}/tokens",other["space_id"].as_str().unwrap()),ADMIN,json!({"request_id":"foreign-token","actor_id":other["default_actor_id"],"consumer_id":other["default_consumer_id"],"scopes":["blob.write"],"resource_grants":{}})).await;
+    let other_token=call(&f.app,"POST",&format!("/admin/v0/spaces/{}/tokens",other["space_id"].as_str().unwrap()),ADMIN,json!({"request_id":"foreign-token","actor_id":other["default_actor_id"],"consumer_id":other["default_consumer_id"]})).await;
     let foreign = upload_as(
         &f,
         "foreign-text",

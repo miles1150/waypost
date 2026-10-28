@@ -164,7 +164,7 @@ function renderAgents() {
       if (result.items.length) renderMessages(result.items, list); else list.append(el('p', t('agent.noRecent')));
       openDetail(t('agent.recentTitle', {name: actor.display_name}), list);
     }));
-    if (!actor.disabled && actor.kind === 'agent') {actions.append(actionButton('manage-connections', t('agent.connections'), () => manageConnections(actor))); if (primaryState.primary_assistant?.actor_id !== actor.actor_id) actions.append(actionButton('choose-primary', t('choosePrimary'), () => choosePrimary(actor))); else actions.append(actionButton('configure-primary', t('configurePrimary'), () => manageConnections(actor, 'primary')));}
+    if (!actor.disabled && actor.kind === 'agent') {actions.append(actionButton('manage-connections', t('agent.connections'), () => manageConnections(actor))); if (primaryState.primary_assistant?.actor_id !== actor.actor_id) actions.append(actionButton('choose-primary', t('choosePrimary'), () => choosePrimary(actor))); else actions.append(actionButton('configure-primary', t('configurePrimary'), () => manageConnections(actor)));}
     if (!actor.disabled && actor.kind === 'agent') actions.append(button(t('agent.suspend'), async () => {
       if (!confirm(t('agent.confirmSuspend', {name: actor.display_name}))) return;
       await api(`/admin/v0/spaces/${spaceId}/actors/${actor.actor_id}/disable`, 'POST', {}); if (spaceId === sid) await load();
@@ -207,7 +207,7 @@ function renderTable(items) {
         return;
       } else showDetail(sections[tab].title, item);
     }));
-    if (tab === 'tokens' && !item.revoked_at && (!item.expires_at || new Date(item.expires_at).getTime() > Date.now())) action.append(actionButton('edit-permissions', t('permission.edit'), () => editPermissions(item, spaceId)));
+    if (tab === 'tokens' && !item.revoked_at && (!item.expires_at || new Date(item.expires_at).getTime() > Date.now())) action.append(actionButton('edit-routing', t('routing.edit'), () => editRouting(item, spaceId)));
     if (tab === 'tokens' && !item.revoked_at) action.append(button(t('token.revoke'), async () => {await api(`/admin/v0/spaces/${sid}/tokens/${item.token_id}`, 'DELETE', {}); await load();}));
     row.append(action); table.append(row);
   }
@@ -264,7 +264,6 @@ $('#new-space').addEventListener('click', () => busy($('#new-space'), async () =
   const space = await api('/admin/v0/spaces', 'POST', {request_id: task.prefix, display_name: task.name});
   sid = space.space_id; finishCreation(); await loadSpaces();
 }));
-const scopeNames = {'message.send': t('scope.send'), 'message.read': t('scope.read'), 'receipt.write': t('scope.receipt'), 'blob.write': t('scope.blob'), 'memory.write': t('scope.memWrite'), 'memory.read': t('scope.memRead')};
 function openOnboarding() {
   if (!sid) throw new Error(t('selectSpace'));
   const task = pendingCreation();
@@ -290,13 +289,13 @@ async function issueConnection(task) {
   while (!credential?.token) {
     if (task.revoke_token_id) {await api(root + `/tokens/${task.revoke_token_id}`, 'DELETE', {}); if (epoch !== authEpoch) return; delete task.revoke_token_id; task.token_request_id = crypto.randomUUID(); saveCreation(task);}
     if (!task.token_request_id) {task.token_request_id = task.prefix + '-token'; saveCreation(task);}
-    credential = await api(root + '/tokens', 'POST', {request_id: task.token_request_id, actor_id: task.actor.actor_id, consumer_id: task.consumer.consumer_id, scopes: task.scopes, resource_grants: task.grants || {}, ...(task.expires_at ? {expires_at: task.expires_at} : {}), ...(task.default_recipient_id ? {default_recipient_id: task.default_recipient_id} : {})});
+    credential = await api(root + '/tokens', 'POST', {request_id: task.token_request_id, actor_id: task.actor.actor_id, consumer_id: task.consumer.consumer_id, ...(task.expires_at ? {expires_at: task.expires_at} : {}), ...(task.default_recipient_id ? {default_recipient_id: task.default_recipient_id} : {})});
     if (epoch !== authEpoch) return;
     if (!credential.token) {task.revoke_token_id = credential.token_id; saveCreation(task);}
   }
   const info = {mcp_url: `${location.origin}/mcp`, headers: {Authorization: `Bearer ${credential.token}`}, actor_id: task.actor.actor_id, consumer_id: task.consumer.consumer_id, default_recipient_id: task.default_recipient_id || spaces.find(s => s.space_id === task.sid)?.default_actor_id, ...(task.collection ? {collection_id: task.collection.collection_id} : {})};
   const body = el('div');
-  body.append(el('p', t('ob.saveNote')), el('pre', JSON.stringify(info, null, 2)), el('h3', t('ob.allows')), el('p', task.scopes.map(s => scopeNames[s] || s).join('；')), el('p', task.expires_at ? t('ob.expiresAt', {date: date(task.expires_at)}) : t('ob.forever')), el('p', t('ob.onboarded')));
+  body.append(el('p', t('ob.saveNote')), el('pre', JSON.stringify(info, null, 2)), el('p', t('ob.spaceAccess')), el('p', task.expires_at ? t('ob.expiresAt', {date: date(task.expires_at)}) : t('ob.forever')), el('p', t('ob.onboarded')));
   openDetail(t('ob.connTitle'), body); sid = task.sid; finishCreation(); await loadSpaces();
 }
 async function createAgent(name, defaultRecipient = null) {
@@ -306,22 +305,21 @@ async function createAgent(name, defaultRecipient = null) {
   const root = `/admin/v0/spaces/${task.sid}`;
   if (!task.actor) {task.actor = await api(root + '/actors', 'POST', {request_id: task.prefix + '-actor', display_name: task.name, kind: 'agent'}); saveCreation(task);}
   if (!task.consumer) {task.consumer = await api(root + '/consumers', 'POST', {request_id: task.prefix + '-consumer', actor_id: task.actor.actor_id, view: 'inbox', filter: {}}); saveCreation(task);}
-  task.scopes = ['message.send']; task.grants = task.default_recipient_id ? {recipient_ids: [task.default_recipient_id]} : {}; saveCreation(task);
   await issueConnection(task);
 }
-async function manageConnections(actor, preset = null) {
+async function manageConnections(actor) {
   const spaceId = sid, epoch = loadEpoch, root = `/admin/v0/spaces/${spaceId}`;
-  const [tokens, consumers, collections] = await Promise.all([api(root + '/inspect', 'POST', {kind: 'tokens', actor_id: actor.actor_id, limit: pageSize}), registry('consumers', spaceId), inspectItems('collections', spaceId)]);
+  const [tokens, consumers] = await Promise.all([api(root + '/inspect', 'POST', {kind: 'tokens', actor_id: actor.actor_id, limit: pageSize}), registry('consumers', spaceId)]);
   if (spaceId !== sid || epoch !== loadEpoch) return;
   const body = el('div');
   body.append(el('p', t('ob.connNote')));
   for (const token of tokens.items) {
     const expired = token.expires_at && new Date(token.expires_at).getTime() <= Date.now();
     const row = el('div', undefined, 'card');
-    row.append(el('p', token.revoked_at ? t('token.revoked') : expired ? t('token.expired') : t('token.valid')), el('p', token.scopes.map(s => scopeNames[s] || s).join('；')), el('p', token.expires_at ? t('token.expiresAt', {date: date(token.expires_at)}) : t('token.forever')), el('code', token.token_id));
+    row.append(el('p', token.revoked_at ? t('token.revoked') : expired ? t('token.expired') : t('token.valid')), el('p', token.expires_at ? t('token.expiresAt', {date: date(token.expires_at)}) : t('token.forever')), el('code', token.token_id));
     const ownerId = spaces.find(s => s.space_id === spaceId)?.default_actor_id;
     row.append(el('p', `${t('recipientLabel')}: ${token.default_recipient_id && token.default_recipient_id !== ownerId ? actorName(token.default_recipient_id) : t('ownerRecipient')}`));
-    if (!token.revoked_at && !expired) row.append(actionButton('edit-permissions', t('permission.edit'), () => editPermissions(token, spaceId)));
+    if (!token.revoked_at && !expired) row.append(actionButton('edit-routing', t('routing.edit'), () => editRouting(token, spaceId)));
     if (!token.revoked_at) row.append(button(t('token.revokeBtn'), async () => {if (!confirm(t('token.confirmRevoke'))) return; await api(root + `/tokens/${token.token_id}`, 'DELETE', {}); if (spaceId === sid) await manageConnections(actor);}));
     body.append(row);
   }
@@ -330,24 +328,12 @@ async function manageConnections(actor, preset = null) {
   const consumerLabel = el('label', t('ob.consumer')), consumer = el('select');
   for (const c of consumers.filter(c => c.actor_id === actor.actor_id && !c.disabled)) {const option = el('option', c.consumer_id); option.value = c.consumer_id; consumer.append(option);}
   consumer.required = true; consumerLabel.append(consumer); form.append(consumerLabel);
-  const scopeInputs = [], scopes = el('fieldset'), choices = el('div', undefined, 'checks'); scopes.append(el('legend', t('ob.allow')));
-  for (const [scope, name] of Object.entries(scopeNames)) {const label = el('label', name), check = el('input'); check.type = 'checkbox'; check.checked = scope === 'message.send' || (preset === 'primary' && ['message.read', 'receipt.write'].includes(scope)); label.prepend(check); choices.append(label); scopeInputs.push([scope, check]);} scopes.append(choices); form.append(scopes);
-  function resourceChoices(title, resources, key) {
-    if (!resources.length) return [];
-    const field = el('fieldset'), list = el('div', undefined, 'checks'), inputs = []; field.append(el('legend', title));
-    for (const r of resources) {const label = el('label', r.display_name), check = el('input'); check.type = 'checkbox'; label.prepend(check); list.append(label); inputs.push([r[key], check]);}
-    field.append(list); form.append(field); return inputs;
-  }
-  const recipients = resourceChoices(t('ob.recipients'), actors.filter(a => a.kind === 'agent' && !a.disabled && a.actor_id !== actor.actor_id), 'actor_id');
   const defaultLabel = el('label', t('recipientLabel')), defaultRecipient = el('select');
   const ownerOption = el('option', t('ownerRecipient')); ownerOption.value = ''; defaultRecipient.append(ownerOption);
-  for (const [id, check] of recipients) {const option = el('option', actorName(id)); option.value = id; defaultRecipient.append(option);}
-  defaultRecipient.addEventListener('change', () => {const entry = recipients.find(([id]) => id === defaultRecipient.value); if (entry) entry[1].checked = true;});
+  for (const target of actors.filter(a => !a.disabled && a.actor_id !== spaces.find(s => s.space_id === spaceId)?.default_actor_id)) {const option = el('option', target.display_name); option.value = target.actor_id; defaultRecipient.append(option);}
   defaultLabel.append(defaultRecipient); form.append(defaultLabel);
 
-  const read = resourceChoices(t('ob.read'), collections.filter(c => c.source_actor_id !== actor.actor_id), 'collection_id');
-  const write = resourceChoices(t('ob.write'), collections.filter(c => c.source_actor_id !== actor.actor_id), 'collection_id');
-  const ownLabel = el('label', t('ob.own')), own = el('input'); own.type = 'checkbox'; ownLabel.prepend(own); form.append(ownLabel, el('p', t('ob.ownNote')));
+  const ownLabel = el('label', t('ob.own')), own = el('input'); own.type = 'checkbox'; ownLabel.prepend(own); form.append(ownLabel);
   const ttlLabel = el('label', t('ob.ttl')), ttl = el('select');
   for (const [value, text] of [['0', t('ob.ttlForever')], ['3600', t('ob.ttl1h')], ['86400', t('ob.ttl1d')], ['604800', t('ob.ttl7d')]]) {const option = el('option', text); option.value = value; ttl.append(option);} ttlLabel.append(ttl); form.append(ttlLabel);
   const submit = el('button', pendingCreation()?.type === 'connection' ? t('ob.resumeIssue') : t('ob.issue')); submit.type = 'submit'; form.append(submit);
@@ -356,111 +342,45 @@ async function manageConnections(actor, preset = null) {
     if (task && (task.type !== 'connection' || task.actor.actor_id !== actor.actor_id || task.sid !== spaceId)) throw new Error(t('ob.resumeOthers'));
     if (!task) {
       if (sid !== spaceId || epoch !== loadEpoch) throw new Error(t('ob.stale'));
-      const selected = scopeInputs.filter(([, i]) => i.checked).map(([scope]) => scope);
-      if (!selected.length) throw new Error(t('ob.pickScope'));
-      if (own.checked && !selected.some(s => s.startsWith('memory.'))) throw new Error(t('ob.needMemory'));
-      const recipientIds = recipients.filter(([, i]) => i.checked).map(([id]) => id);
-      if (defaultRecipient.value && !recipientIds.includes(defaultRecipient.value)) throw new Error(t('ob.defaultScope'));
-      if (recipientIds.length && !selected.includes('message.send')) throw new Error(t('ob.needSend'));
-      if (read.some(([, i]) => i.checked) && !selected.includes('memory.read')) throw new Error(t('ob.needRead'));
-      if (write.some(([, i]) => i.checked) && !selected.includes('memory.write')) throw new Error(t('ob.needWrite'));
-      task = {type: 'connection', name: actor.display_name, sid: spaceId, actor, consumer: {consumer_id: consumer.value}, prefix: crypto.randomUUID(), scopes: selected, grants: {recipient_ids: recipientIds.length ? [spaces.find(s => s.space_id === spaceId).default_actor_id, ...recipientIds] : [], memory_read_collection_ids: read.filter(([, i]) => i.checked).map(([id]) => id), memory_write_collection_ids: write.filter(([, i]) => i.checked).map(([id]) => id)}, default_recipient_id: defaultRecipient.value || null, create_collection: own.checked, expires_at: Number(ttl.value) ? new Date(Date.now() + Number(ttl.value) * 1000).toISOString() : null}; saveCreation(task);
+      task = {type: 'connection', name: actor.display_name, sid: spaceId, actor, consumer: {consumer_id: consumer.value}, prefix: crypto.randomUUID(), default_recipient_id: defaultRecipient.value || null, create_collection: own.checked, expires_at: Number(ttl.value) ? new Date(Date.now() + Number(ttl.value) * 1000).toISOString() : null}; saveCreation(task);
     }
     if (task.create_collection && !task.collection) {task.collection = await api(root + '/collections', 'POST', {request_id: task.prefix + '-collection', source_actor_id: actor.actor_id, display_name: actor.display_name + t('ob.collSuffix'), scope: 'personal/default'}); saveCreation(task);}
     await issueConnection(task);
   });});
   body.append(form); openDetail(t('ob.connFor', {name: actor.display_name}), body);
 }
-async function editPermissions(token, spaceId) {
-  const generation = authEpoch, root = `/admin/v0/spaces/${spaceId}`, path = `${root}/tokens/${token.token_id}/permissions`;
-  const [initial, collections] = await Promise.all([api(path), inspectItems('collections', spaceId)]);
+async function editRouting(token, spaceId) {
+  const generation = authEpoch, path = `/admin/v0/spaces/${spaceId}/tokens/${token.token_id}/routing`;
+  const current = await api(path);
   if (spaceId !== sid || generation !== authEpoch) return;
-  let current = initial, saving = false;
-  const form = el('form', undefined, 'connection-form'), review = el('div'), conflict = el('div');
-  form.dataset.permissionEditor = token.token_id;
-  const active = () => sid === spaceId && generation === authEpoch && form.isConnected && $('#detail').open;
-  const unavailable = value => value.revoked_at || (value.expires_at && new Date(value.expires_at).getTime() <= Date.now());
-  form.append(el('p', t('permission.note')), el('code', token.token_id), el('p', t('permission.history')));
-  if (unavailable(initial) || initial.editable === false) {openDetail(t('permission.title'), el('p', t('permission.inactive'))); return;}
-  const inputs = [], scopeInputs = [], grantInputs = {};
-  const scopeLabels = {...scopeNames, 'space.observe': t('permission.observe'), 'blob.reference': t('permission.reference'), 'event.subscribe': t('permission.subscribe')};
-  function checks(title, entries, selected, key) {
-    const field = el('fieldset'), list = el('div', undefined, 'checks'), result = [];
-    field.append(el('legend', title));
-    for (const [id, name] of entries) {
-      const label = el('label', name), input = el('input'); input.type = 'checkbox'; input.checked = selected.includes(id); input.dataset.permissionField = key; input.value = id;
-      input.addEventListener('change', () => review.replaceChildren());
-      label.prepend(input); list.append(label); inputs.push(input); result.push([id, input]);
-    }
-    field.append(list); form.append(field); return result;
-  }
-  scopeInputs.push(...checks(t('ob.allow'), [...new Set([...Object.keys(scopeLabels), ...initial.scopes])].map(id => [id, scopeLabels[id] || id]), initial.scopes, 'scopes'));
-  const grants = initial.resource_grants, owner = spaces.find(s => s.space_id === spaceId)?.default_actor_id;
-  const recipientIds = [...new Set([owner, ...actors.filter(a => !a.disabled).map(a => a.actor_id), ...grants.recipient_ids].filter(Boolean))];
-  grantInputs.recipient_ids = checks(t('ob.recipients'), recipientIds.map(id => [id, id === owner ? t('ownerRecipient') : actorName(id)]), grants.recipient_ids.length ? grants.recipient_ids : [owner], 'recipient_ids');
-  for (const [key, title] of [['memory_read_collection_ids', t('ob.read')], ['memory_write_collection_ids', t('ob.write')]]) {
-    const ids = [...new Set([...collections.map(c => c.collection_id), ...grants[key]])];
-    grantInputs[key] = checks(title, ids.map(id => [id, collections.find(c => c.collection_id === id)?.display_name || id]), grants[key], key);
-  }
-  form.append(el('p', t('ob.ownNote')));
-  const blobLabel = el('label', t('permission.blobs')), blobs = el('textarea'); blobs.rows = 3; blobs.value = grants.blob_reference_ids.join('\n'); blobs.dataset.permissionField = 'blob_reference_ids';
-  blobs.addEventListener('input', () => review.replaceChildren()); inputs.push(blobs); blobLabel.append(blobs); form.append(blobLabel);
-  function draft() {
-    const resource_grants = {};
-    for (const [key, values] of Object.entries(grantInputs)) resource_grants[key] = values.filter(([, input]) => input.checked).map(([id]) => id).sort();
-    if (!resource_grants.recipient_ids.length) throw new Error(t('permission.recipientRequired'));
-    if (resource_grants.recipient_ids.length === 1 && resource_grants.recipient_ids[0] === owner) resource_grants.recipient_ids = [];
-    resource_grants.blob_reference_ids = [...new Set(blobs.value.split(/[\s,]+/).filter(Boolean))].sort();
-    const scopes = scopeInputs.filter(([, input]) => input.checked).map(([id]) => id).sort();
-    return {scopes, resource_grants};
-  }
-  const normalized = value => ({scopes:[...value.scopes].sort(), resource_grants:Object.fromEntries(Object.keys(grants).map(key => [key, [...(value.resource_grants[key] || [])].sort()]))});
-  function describe(value) {
-    const list = el('ul');
-    list.append(el('li', value.scopes.map(s => scopeLabels[s] || s).join('; ') || t('permission.none')));
-    for (const [key, title] of [['recipient_ids', t('ob.recipients')], ['memory_read_collection_ids', t('ob.read')], ['memory_write_collection_ids', t('ob.write')], ['blob_reference_ids', t('permission.blobs')]]) {
-      const ids = value.resource_grants[key] || [];
-      list.append(el('li', `${title}: ${ids.length ? ids.map(id => key === 'recipient_ids' ? actorName(id) : collections.find(c => c.collection_id === id)?.display_name || id).join(', ') : key === 'recipient_ids' ? t('ownerRecipient') : t('permission.none')}`));
-    }
-    return list;
-  }
-  async function loadLatest() {
-    const latest = await api(path);
-    if (!active()) return;
-    review.replaceChildren(); conflict.replaceChildren(el('p', t('permission.conflict')), el('h3', t('permission.latest')), describe(latest));
-    if (unavailable(latest) || latest.editable === false) {current = latest; inputs.forEach(input => input.disabled = true); preview.disabled = true; conflict.append(el('p', t('permission.inactive'))); return;}
-    conflict.append(actionButton('permission-use-latest', t('permission.useLatest'), () => {current = latest; conflict.replaceChildren(el('p', t('permission.rebased'))); review.replaceChildren();}));
-  }
-  const preview = el('button', t('permission.review')); preview.type = 'submit'; preview.dataset.permissionReview = '';
-  form.append(preview, conflict, review);
-  form.addEventListener('submit', event => {event.preventDefault(); if (saving) return; busy(preview, async () => {
-    if (!active()) return;
-    const value = draft();
-    if (JSON.stringify(normalized(value)) === JSON.stringify(normalized(current))) {review.replaceChildren(el('p', t('permission.unchanged'))); return;}
-    const requestId = crypto.randomUUID();
-    const commit = actionButton('permission-save', t('permission.save'), async () => {
-      if (!active() || saving) return;
-      saving = true; inputs.forEach(input => input.disabled = true); preview.disabled = true;
-      try {
-        const result = await api(path, 'PUT', {request_id: requestId, expected_authority_version: current.authority_version, ...value, default_recipient_id: current.default_recipient_id ?? null});
-        if (!active()) return;
-        openDetail(t('permission.title'), el('p', t('permission.saved')), el('code', token.token_id), describe(result));
-      } catch (error) {
-        if (!active()) return;
-        if (error.code === 'REVISION_CONFLICT') await loadLatest();
-        else throw error;
-      } finally {saving = false; if (active() && !unavailable(current) && current.editable !== false) {inputs.forEach(input => input.disabled = false); preview.disabled = false;}}
-    });
-    review.replaceChildren(el('h3', t('permission.before')), describe(current), el('h3', t('permission.after')), describe(value), commit);
+  if (!current.editable) {openDetail(t('routing.edit'), el('p', t('routing.inactive'))); return;}
+  const form = el('form'), label = el('label', t('recipientLabel')), recipient = el('select');
+  const owner = spaces.find(s => s.space_id === spaceId)?.default_actor_id;
+  const own = el('option', t('ownerRecipient')); own.value = ''; recipient.append(own);
+  for (const actor of actors.filter(a => !a.disabled && a.actor_id !== owner)) {const option = el('option', actor.display_name); option.value = actor.actor_id; recipient.append(option);}
+  if (current.default_recipient_id && current.default_recipient_id !== owner && ![...recipient.options].some(o => o.value === current.default_recipient_id)) {const option = el('option', actorName(current.default_recipient_id)); option.value = current.default_recipient_id; recipient.append(option);}
+  recipient.value = current.default_recipient_id === owner ? '' : current.default_recipient_id || '';
+  label.append(recipient);
+  const submit = el('button', t('routing.save')); submit.type = 'submit';
+  form.append(el('p', t('routing.note')), label, submit);
+  let pending = null, conflict = false;
+  recipient.addEventListener('change', () => {pending = null;});
+  form.addEventListener('submit', event => {event.preventDefault(); busy(submit, async () => {
+    if (spaceId !== sid || generation !== authEpoch) return;
+    if (conflict) return;
+    pending ||= {request_id: crypto.randomUUID(), expected_authority_version: current.authority_version, default_recipient_id: recipient.value || null};
+    recipient.disabled = true;
+    try {
+      await api(path, 'PUT', pending);
+      if (spaceId === sid && generation === authEpoch) openDetail(t('routing.edit'), el('p', t('routing.saved')));
+    } catch (error) {
+      if (error.code === 'REVISION_CONFLICT') {conflict = true;submit.hidden = true; form.append(el('p', t('routing.conflict')), button(t('routing.reload'), () => editRouting(token, spaceId)));}
+      throw error;
+    } finally {recipient.disabled = false;}
   });});
-  openDetail(t('permission.title'), form);
+  openDetail(t('routing.edit'), form);
 }
 
-async function inspectItems(kind, spaceId) {
-  const items = []; let next = null;
-  do {const page = await api(`/admin/v0/spaces/${spaceId}/inspect`, 'POST', {kind, limit: pageSize, cursor: next}); items.push(...page.items); next = page.has_more ? page.next_cursor : null;} while (next);
-  return items;
-}
 $('#add-agent').addEventListener('click', () => busy($('#add-agent'), () => openOnboarding()));
 startOnboardingSession();
 
@@ -489,7 +409,7 @@ async function choosePrimary(actor) {
     await api(`/admin/v0/spaces/${spaceId}/primary-assistant`, 'PUT', {expected_revision: revision, actor_id: actor.actor_id});
     if (spaceId !== sid) return;
     await load();
-    await manageConnections(actor, 'primary');
+    await manageConnections(actor);
   }, ''));
   openDetail(t('choosePrimary'), form);
 }

@@ -24,8 +24,8 @@ Every result carries source and time. Muse can keep organizing along received me
 
 Prices, routes and alert thresholds are samples; real prices follow suppliers at check time. Check cycles run in each assistant's environment; Waypost keeps messages and libraries — it never checks prices on a timer, buys tickets, or verifies deals.
 
-## Which permissions to open
+## Connection and collection setup
 
-Grok Bot needs permission to send to Muse. Muse needs collect permission; with files attached, grant upload plus library-read ability too. Price alerts never include buying permission.
+Connect Grok Bot and Muse to the same space and address Muse when sending. Muse collects through a host schedule or bridge; materials and attachments are shared in the space. Price alerts never authorize a purchase.
 
 Start from the [setup steps](/guide/#main-assistant) and send one real round of results into the inbox.

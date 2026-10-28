@@ -50,12 +50,10 @@ async fn a_producer_can_publish_once_and_an_independent_consumer_reads_the_exact
     let consumer = call(&app, "POST", &format!("/admin/v0/spaces/{sid}/consumers"), ADMIN,
         json!({"request_id":"setup-writer-consumer","actor_id":actor_id,"view":"inbox","filter":{}})).await;
     let sender = call(&app, "POST", &format!("/admin/v0/spaces/{sid}/tokens"), ADMIN,
-        json!({"request_id":"setup-writer-token","actor_id":actor_id,"consumer_id":consumer["consumer_id"],
-            "scopes":["message.send","message.read"],"resource_grants":{}})).await;
+        json!({"request_id":"setup-writer-token","actor_id":actor_id,"consumer_id":consumer["consumer_id"]})).await;
     let sender_token = sender["token"].as_str().unwrap();
     let reader = call(&app, "POST", &format!("/admin/v0/spaces/{sid}/tokens"), ADMIN,
-        json!({"request_id":"setup-reader-token","actor_id":space["default_actor_id"],"consumer_id":space["default_consumer_id"],
-            "scopes":["message.read","receipt.write"],"resource_grants":{}})).await;
+        json!({"request_id":"setup-reader-token","actor_id":space["default_actor_id"],"consumer_id":space["default_consumer_id"]})).await;
     let reader_token = reader["token"].as_str().unwrap();
     let message = json!({"request_id":"report-001","kind":"result","subject":"A durable report",
         "body":{"text":"Exact original content"},"attachment_ids":[],"metadata":{}});

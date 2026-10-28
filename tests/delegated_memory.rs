@@ -3,7 +3,7 @@ use common::*;
 use serde_json::json;
 use waypost::Request;
 #[tokio::test(flavor = "current_thread")]
-async fn delegated_write_does_not_turn_a_private_full_manifest_into_the_writers_owned_blob() {
+async fn space_member_can_extend_and_read_shared_manifest() {
     let f = Fixture::new().await;
     let collection=call(&f.app,"POST",&format!("/admin/v0/spaces/{}/collections",f.sid()),ADMIN,json!({"request_id":"private-source","source_actor_id":f.writer["actor_id"],"scope":"private-source","display_name":"Private"})).await;
     let cid = collection["collection_id"].as_str().unwrap();
@@ -40,11 +40,11 @@ async fn delegated_write_does_not_turn_a_private_full_manifest_into_the_writers_
         "POST",
         &format!("/admin/v0/spaces/{}/actors", f.sid()),
         ADMIN,
-        json!({"request_id":"delegate","display_name":"Write only","kind":"agent"}),
+        json!({"request_id":"delegate","display_name":"Collaborator","kind":"agent"}),
     )
     .await;
     let consumer=call(&f.app,"POST",&format!("/admin/v0/spaces/{}/consumers",f.sid()),ADMIN,json!({"request_id":"delegate-consumer","actor_id":actor["actor_id"],"view":"inbox","filter":{}})).await;
-    let token=call(&f.app,"POST",&format!("/admin/v0/spaces/{}/tokens",f.sid()),ADMIN,json!({"request_id":"delegate-token","actor_id":actor["actor_id"],"consumer_id":consumer["consumer_id"],"scopes":["memory.write","blob.write"],"resource_grants":{"memory_write_collection_ids":[cid]}})).await;
+    let token=call(&f.app,"POST",&format!("/admin/v0/spaces/{}/tokens",f.sid()),ADMIN,json!({"request_id":"delegate-token","actor_id":actor["actor_id"],"consumer_id":consumer["consumer_id"]})).await;
     let token = token["token"].as_str().unwrap();
     let p = call(&f.app, "POST", "/v0/uploads", token, prepare("addition")).await;
     let mut r = Request::json(
@@ -76,7 +76,7 @@ async fn delegated_write_does_not_turn_a_private_full_manifest_into_the_writers_
         )
         .await
         .0,
-        404
+        200
     );
     let data = call(
         &f.app,

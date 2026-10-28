@@ -1,16 +1,16 @@
 <!doctype html><html lang="en" data-page="rfc-doc"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>领域术语 — Waypost RFC</title><meta name="description" content="领域术语. Waypost protocol and implementation doc, kept in its original state, with a chapter index and downloadable source. Full text is currently Chinese-only."><meta name="theme-color" content="#f5f5f7"><link rel="canonical" href="https://waypost.hika.fyi/rfc/glossary/"><link rel="alternate" hreflang="en" href="https://waypost.hika.fyi/rfc/glossary/"><link rel="alternate" hreflang="zh" href="https://waypost.hika.fyi/rfc/glossary/?lang=zh"><link rel="alternate" hreflang="x-default" href="https://waypost.hika.fyi/rfc/glossary/"><link rel="icon" href="/assets/mark.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/site.css"><script src="/assets/i18n.js" defer></script></head><body><a class="skip-link" href="#main" data-i18n="common.skip">Skip to main content</a><header class="site-header"><div class="container header-inner"><a class="brand" href="/" data-i18n-aria="common.brandAria" aria-label="Waypost home"><img src="/assets/mark.svg" alt="" width="34" height="34"><span>waypost<span class="brand-dot">.</span></span></a><nav class="main-nav" data-i18n-aria="common.navLabel" aria-label="Primary"><a href="/use-cases/" data-i18n="common.navCases">Use cases</a><a href="/rfc/" aria-current="page" data-i18n="common.navRfc">RFC</a><a href="/privacy/" data-i18n="common.navPrivacy">Data &amp; privacy</a></nav><div class="header-side"><div class="lang-switch" role="group" data-i18n-aria="common.langLabel" aria-label="Language"><button type="button" data-lang="zh" aria-pressed="false">中文</button><button type="button" data-lang="en" aria-pressed="true">EN</button></div><a class="header-action" href="/guide/" data-i18n-html="common.headerStartHtml">Get started <span aria-hidden="true">↗</span></a></div></div></header><main id="main" class="container guide-layout rfc-layout"><aside class="guide-toc rfc-toc"><p>REFERENCE</p><a class="back-link" href="/rfc/" data-i18n="rfc.backAll">← All RFCs &amp; implementation docs</a><nav class="rfc-toc-nav" data-i18n-aria="rfc.tocLabel" aria-label="Document sections"><a href="#language">Language</a></nav></aside><article class="guide-article rfc-article"><p class="eyebrow section-label">WAYPOST / REFERENCE</p><h1>Waypost</h1><div class="rfc-source-links"><a href="/rfc/source/CONTEXT.md" download data-i18n="rfc.sourceDl">Download Markdown source ↗</a><a href="/rfc/validation/" data-i18n="rfc.seeValidation">See validation ↗</a></div><p class="notice-box" data-i18n-html="rfc.noticeHtml">Body generated from repo docs, preserving original spec status and examples. Draft RFCs and validation plans may differ from the current implementation; verified scope is in the implementation record, and encryption plus user-isolation upgrades are in the <a href="/rfc/security/">security notes</a>. Full text is currently Chinese-only; the English version is in progress.</p><div class="rfc-body"><p>供用户、个人 Agent 与客户端交换持久消息和记忆资料的通用服务。服务记录投递、收取和版本事实，参与方可以在不同时间上线。</p>
 <h2 id="language">Language</h2>
-<p><strong>Space / 用户空间</strong>：一个所有者管理的身份、信箱和记忆授权边界。不同空间的对象不可因名称相同而互相访问。</p>
+<p><strong>Space / 用户空间</strong>：一个所有者管理的身份、信箱和共享资料隔离边界。不同空间的对象不可因名称相同而互相访问。</p>
 <p><strong>Actor / 参与者</strong>：空间内可识别的用户、Agent 或客户端身份。显示名称可以修改，身份本身保持稳定。
 <em>Avoid</em>：把产品品牌、令牌或设备直接当作参与者。</p>
-<p><strong>Primary Assistant / 主助手</strong>：用户主要对话的助手，收取其他助手交付的结果，整理进展并向用户汇报。角色由用户选择，不自动扩大权限。
+<p><strong>Primary Assistant / 主助手</strong>：用户主要对话的助手，收取其他助手交付的结果，整理进展并向用户汇报。角色由用户选择，不授予空间管理能力，也不改写旧连接路由。
 <em>Avoid</em>：将主助手等同于服务管理员，或固定绑定到某个产品品牌。</p>
-<p><strong>Connected Assistant / 接入助手</strong>：以独立身份和受限连接向获准收件人交付结果的助手。</p>
+<p><strong>Connected Assistant / 接入助手</strong>：以独立身份和有效连接向同空间参与者交付结果的助手。</p>
 <p><strong>Invitation / 邀请</strong>：服务运行者授予用户进入指定个人空间的有期限、可撤销的一次性接入凭据。</p>
-<p><strong>Principal / 调用主体</strong>：经过认证并具有明确参与者身份与授权范围的请求发起方。</p>
-<p><strong>Consumer / 消费者</strong>：一个稳定的收取身份，绑定参与者与可读视图。不同消费者独立保存收取和处理记录。
+<p><strong>Principal / 调用主体</strong>：经过认证并具有明确 Space、Actor 和 Consumer 身份的请求发起方。普通连接与管理身份分离。</p>
+<p><strong>Consumer / 消费者</strong>：一个稳定的收取身份，绑定参与者与收取视图。不同消费者独立保存收取和处理记录。
 <em>Avoid</em>：把消费者等同于收件人或临时网络连接。</p>
-<p><strong>Mailbox / 信箱</strong>：参与者获准收取的消息与资料变化集合。内容可以在接收方离线时提交。</p>
+<p><strong>Mailbox / 信箱</strong>：参与者收取的消息与空间共享资料变化集合。内容可以在接收方离线时提交。</p>
 <p><strong>Message / 消息</strong>：一次已发布的不可变信息投递，包含收件范围、正文、来源和附件引用。
 <em>Avoid</em>：把消息当作已经完成的任务。</p>
 <p><strong>Thread / 会话</strong>：关联同一主题往返消息的稳定记录。会话参与者受独立的访问授权约束。</p>
@@ -21,7 +21,7 @@
 <p><strong>Feed / 增量记录</strong>：按发布顺序提供、可以从位置继续读取的可见变化集合。</p>
 <p><strong>Cursor / 游标</strong>：消费者在特定可读视图中的读取位置。它不表示该位置之前的业务工作均已完成。</p>
 <p><strong>Blob / 资料对象</strong>：服务管理的文件内容，由稳定引用定位。暂存上传和可被引用的最终资料是不同状态。</p>
-<p><strong>Collection / 记忆集</strong>：具有固定来源与授权范围的记忆条目集合。来源资料与其他参与者整理后的资料可以分别成为记忆集。</p>
+<p><strong>Collection / 记忆集</strong>：具有固定来源、在空间内共享读写的记忆条目集合。来源资料与其他参与者整理后的资料可以分别成为记忆集。</p>
 <p><strong>Memory Item / 记忆条目</strong>：记忆集内具有稳定标识的资料及其来源说明。条目不因正文变化而自动获得新身份。</p>
 <p><strong>Revision / 记忆版本</strong>：一次已发布的记忆集状态。它明确覆盖哪些条目和删除标记。</p>
 <p><strong>Snapshot / 完整快照</strong>：对一个明确记忆集完整内容的替换声明。局部资料应表达为增量。</p>

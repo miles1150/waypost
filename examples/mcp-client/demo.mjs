@@ -16,7 +16,7 @@ async function control(path, body) {
 const space = await control('/admin/v0/spaces', {request_id: `${prefix}-space`, display_name: 'MCP trial'});
 const actor = await control(`/admin/v0/spaces/${space.space_id}/actors`, {request_id: `${prefix}-actor`, display_name: 'Demo assistant', kind: 'agent'});
 const consumer = await control(`/admin/v0/spaces/${space.space_id}/consumers`, {request_id: `${prefix}-consumer`, actor_id: actor.actor_id, view: 'inbox', filter: {}});
-const credential = await control(`/admin/v0/spaces/${space.space_id}/tokens`, {request_id: `${prefix}-token`, actor_id: actor.actor_id, consumer_id: consumer.consumer_id, scopes: ['message.send', 'message.read', 'receipt.write', 'blob.write', 'memory.write', 'memory.read'], resource_grants: {}});
+const credential = await control(`/admin/v0/spaces/${space.space_id}/tokens`, {request_id: `${prefix}-token`, actor_id: actor.actor_id, consumer_id: consumer.consumer_id});
 const client = new Client({name: 'waypost-demo', version: '0.1.0'}, {capabilities: {}});
 try {
   await client.connect(new StreamableHTTPClientTransport(new URL(origin + '/mcp'), {requestInit: {headers: {'authorization': `Bearer ${credential.token}`}}}));

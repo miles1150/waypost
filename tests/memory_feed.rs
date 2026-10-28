@@ -3,7 +3,7 @@ use common::*;
 use serde_json::json;
 
 #[tokio::test(flavor = "current_thread")]
-async fn explicit_collection_grants_deliver_version_events_and_fixed_revision_pages() {
+async fn space_shared_collections_deliver_version_events_and_fixed_revision_pages() {
     let f = Fixture::new().await;
     let c=call(&f.app,"POST",&format!("/admin/v0/spaces/{}/collections",f.sid()),ADMIN,json!({"request_id":"feed-collection","source_actor_id":f.writer["actor_id"],"scope":"portable","display_name":"Portable"})).await;
     let cid = c["collection_id"].as_str().unwrap();
@@ -38,9 +38,9 @@ async fn explicit_collection_grants_deliver_version_events_and_fixed_revision_pa
         raw(&f.app, "POST", &read, &f.reader_token, json!({}))
             .await
             .0,
-        404
+        200
     );
-    let reader=call(&f.app,"POST",&format!("/admin/v0/spaces/{}/tokens",f.sid()),ADMIN,json!({"request_id":"memory-reader","actor_id":f.space["default_actor_id"],"consumer_id":f.space["default_consumer_id"],"scopes":["memory.read","receipt.write"],"resource_grants":{"memory_read_collection_ids":[cid]}})).await;
+    let reader=call(&f.app,"POST",&format!("/admin/v0/spaces/{}/tokens",f.sid()),ADMIN,json!({"request_id":"memory-reader","actor_id":f.space["default_actor_id"],"consumer_id":f.space["default_consumer_id"]})).await;
     let token = reader["token"].as_str().unwrap();
     let feed = call(
         &f.app,

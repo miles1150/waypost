@@ -122,7 +122,19 @@ class Consumer:
         create_tables(self.db)
         identity = client.request('GET', '/v0/describe')
         self.identity = identity
-        self.binding = hashlib.sha256(encoded({'origin': client.origin, 'space': identity['space_id'], 'actor': identity['actor_id'], 'consumer': identity['consumer_id'], 'view': identity['view_revision'], 'scopes': identity['scopes'], 'grants': identity['resource_grants']})).hexdigest()
+        if identity.get('access_model') != 'space_membership':
+            self.db.close()
+            raise RuntimeError('This consumer requires a deployed space_membership server.')
+        self.db.execute('CREATE TABLE IF NOT EXISTS consumer_format(version INTEGER PRIMARY KEY)')
+        if not self.db.execute('SELECT 1 FROM consumer_format WHERE version=2').fetchone():
+            populated = any(self.db.execute(f'SELECT 1 FROM {table} LIMIT 1').fetchone() for table in
+                            ('cursors', 'inbox', 'outbound_requests'))
+            if populated:
+                self.db.close()
+                raise RuntimeError('Legacy consumer ledger requires explicit migration. Preserve it; reconcile pending work with the old client before migrating. Do not delete it or silently start a new ledger.')
+            self.db.execute('INSERT INTO consumer_format VALUES(2)')
+            self.db.commit()
+        self.binding = hashlib.sha256(encoded({'origin': client.origin, 'space': identity['space_id'], 'actor': identity['actor_id'], 'consumer': identity['consumer_id'], 'view': identity['view_revision'], 'access_model': identity['access_model']})).hexdigest()
         self.producer_binding = hashlib.sha256(encoded({'origin': client.origin, 'space': identity['space_id'], 'actor': identity['actor_id']})).hexdigest()
 
     def close(self):

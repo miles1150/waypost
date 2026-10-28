@@ -181,11 +181,9 @@ def main():
         consumer = control.request('POST', root + '/consumers', {
             'request_id': prefix + name + '-consumer', 'actor_id': actor['actor_id'],
             'view': 'inbox', 'filter': {}})
-        scopes = ['message.send', 'message.read', 'receipt.write'] if name == 'primary' else ['message.send']
         token = control.request('POST', root + '/tokens', {
             'request_id': prefix + name + '-token', 'actor_id': actor['actor_id'],
-            'consumer_id': consumer['consumer_id'], 'scopes': scopes,
-            'resource_grants': {} if name == 'primary' else {'recipient_ids': [roles['primary']['actor_id']]},
+            'consumer_id': consumer['consumer_id'],
             **({} if name == 'primary' else {'default_recipient_id': roles['primary']['actor_id']})})
         roles[name] = {**actor, **consumer, 'token': token['token']}
     permissions = [{'action': '*', 'resource': '*', 'effect': 'deny'},

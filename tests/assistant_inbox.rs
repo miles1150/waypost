@@ -88,17 +88,14 @@ async fn dashboard_inbox_shows_only_owner_deliveries_and_binds_its_cursor() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn sender_connection_can_report_and_recover_without_inbox_or_data_access() {
+async fn connection_can_send_receive_and_recover_but_cannot_manage_space() {
     let f = Fixture::new().await;
     let path = format!("/admin/v0/spaces/{}/tokens", f.sid());
-    let credential = call(&f.app,"POST",&path,ADMIN,json!({"request_id":"sender-only","actor_id":f.writer["actor_id"],"consumer_id":f.writer_consumer["consumer_id"],"scopes":["message.send"],"resource_grants":{}})).await;
+    let credential = call(&f.app,"POST",&path,ADMIN,json!({"request_id":"sender-only","actor_id":f.writer["actor_id"],"consumer_id":f.writer_consumer["consumer_id"]})).await;
     let token = credential["token"].as_str().unwrap();
     let describe = call(&f.app, "GET", "/v0/describe", token, json!({})).await;
-    assert_eq!(describe["scopes"], json!(["message.send"]));
-    assert_eq!(
-        describe["allowed_recipient_ids"],
-        json!([f.space["default_actor_id"]])
-    );
+    assert!(describe.get("scopes").is_none());
+    assert!(describe.get("resource_grants").is_none());
     let sent = call(&f.app,"POST","/v0/messages",token,json!({"request_id":"first-report","kind":"info","subject":"Connected","body":{"text":"My first report"},"metadata":{}})).await;
     let status = call(
         &f.app,
@@ -110,21 +107,24 @@ async fn sender_connection_can_report_and_recover_without_inbox_or_data_access()
     .await;
     assert_eq!(status["submission_state"], "committed");
     assert_eq!(status["resource_id"], sent["message_id"]);
-    for (route, body) in [
-        (
-            "/v0/inbox/read",
-            json!({"consumer_id":f.writer_consumer["consumer_id"]}),
-        ),
-        ("/v0/uploads", json!({})),
-        ("/v0/receipts", json!({})),
-    ] {
-        assert_eq!(
-            raw(&f.app, "POST", route, token, body).await.0,
-            403,
-            "{route}"
-        );
-    }
-    assert_eq!(raw(&f.app,"POST","/v0/messages",token,json!({"request_id":"unauthorized-recipient","recipient_ids":[f.writer["actor_id"]],"kind":"info","subject":"Forbidden","body":{"text":"No"},"metadata":{}})).await.0,403);
+    call(
+        &f.app,
+        "POST",
+        "/v0/inbox/read",
+        token,
+        json!({"consumer_id":f.writer_consumer["consumer_id"]}),
+    )
+    .await;
+    let to_self = call(&f.app,"POST","/v0/messages",token,json!({"request_id":"same-space-recipient","recipient_ids":[f.writer["actor_id"]],"kind":"info","subject":"Allowed","body":{"text":"Yes"}})).await;
+    call(
+        &f.app,
+        "GET",
+        &format!("/v0/messages/{}", to_self["message_id"].as_str().unwrap()),
+        token,
+        json!({}),
+    )
+    .await;
+    assert_eq!(raw(&f.app,"POST",&path,token,json!({"request_id":"self-issue","actor_id":f.writer["actor_id"],"consumer_id":f.writer_consumer["consumer_id"]})).await.0,401);
     let inspect = call(
         &f.app,
         "POST",
@@ -139,7 +139,7 @@ async fn sender_connection_can_report_and_recover_without_inbox_or_data_access()
         .iter()
         .find(|v| v["token_id"] == credential["token_id"])
         .unwrap();
-    assert_eq!(stored["scopes"], json!(["message.send"]));
+    assert!(stored.get("scopes").is_none());
     assert!(stored.get("token").is_none());
     assert!(stored.get("token_digest").is_none());
     call(

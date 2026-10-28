@@ -22,7 +22,6 @@ struct Ack {
 }
 impl<D: Database, O: ObjectStore> App<D, O> {
     pub(crate) async fn ack(&self, p: &Principal, value: Value) -> Result<Value> {
-        p.require("receipt.write")?;
         let fp = fingerprint(&value)?;
         let input: Ack = crate::json::decode(value)?;
         check_request_id(&input.request_id)?;
@@ -162,7 +161,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                 p.space_id.clone().into(),
                 p.consumer_id.clone().into(),
                 p.view_revision.into(),
-                self.feed_grant_fingerprint(p)?.into(),
+                self.feed_visibility_fingerprint(p)?.into(),
                 (position as i64).into(),
                 now.into(),
             ];
@@ -199,24 +198,15 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         )
     }
     pub(crate) fn feed_visibility(&self, p: &Principal, alias: &str) -> (String, Vec<Sql>) {
-        let observe = p.view == "space_log" && p.has("space.observe");
+        let observe = p.view == "space_log" && p.owner_authority.is_some();
         (
             format!(
-                "(({}.item_type='message' AND ?=1 AND (?=1 OR EXISTS(SELECT 1 FROM feed_recipients vr WHERE vr.space_id={alias}.space_id AND vr.item_id={alias}.item_id AND vr.actor_id=?))) OR ({}.item_type='receipt' AND (?=1 OR EXISTS(SELECT 1 FROM feed_recipients vr WHERE vr.space_id={alias}.space_id AND vr.item_id={alias}.item_id AND vr.actor_id=?))) OR ({alias}.item_type='memory_revision' AND ?=1 AND EXISTS(SELECT 1 FROM memory_collections mc WHERE mc.space_id={alias}.space_id AND mc.collection_id={alias}.resource_id AND (mc.source_actor_id=? OR EXISTS(SELECT 1 FROM token_collections tc WHERE tc.token_id=? AND tc.space_id=mc.space_id AND tc.collection_id=mc.collection_id AND tc.action='read')))))",
-                alias, alias
+                "(({alias}.item_type IN ('message','receipt') AND (?=1 OR EXISTS(SELECT 1 FROM feed_recipients vr WHERE vr.space_id={alias}.space_id AND vr.item_id={alias}.item_id AND vr.actor_id=?))) OR ({alias}.item_type='memory_revision' AND EXISTS(SELECT 1 FROM memory_collections mc WHERE mc.space_id={alias}.space_id AND mc.collection_id={alias}.resource_id)))"
             ),
-            vec![
-                (observe || p.has("message.read")).into(),
-                observe.into(),
-                p.actor_id.clone().into(),
-                observe.into(),
-                p.actor_id.clone().into(),
-                p.has("memory.read").into(),
-                p.actor_id.clone().into(),
-                p.token_id.clone().into(),
-            ],
+            vec![observe.into(), p.actor_id.clone().into()],
         )
     }
+
     pub(crate) async fn read_feed_rows(
         &self,
         p: &Principal,
@@ -265,9 +255,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         if required(&value, "consumer_id")? != p.consumer_id {
             return Err(Error::not_found());
         }
-        if p.view == "space_log" {
-            p.require("space.observe")?;
-        } else if !p.has("message.read") && !p.has("memory.read") {
+        if p.view == "space_log" && p.owner_authority.is_none() {
             return Err(Error::forbidden());
         }
         let position = match value.get("cursor") {
