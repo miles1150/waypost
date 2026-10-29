@@ -1,5 +1,6 @@
 pub mod domain;
 pub mod error;
+mod gateway;
 pub mod http;
 mod json;
 #[cfg(feature = "native")]

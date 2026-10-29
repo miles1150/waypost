@@ -23,6 +23,7 @@ mod dashboard;
 mod dashboard_memory;
 mod encryption;
 mod invitations;
+pub mod keys;
 mod mailbox;
 mod maintenance;
 mod mcp;
@@ -103,6 +104,9 @@ pub struct App<D, O> {
     pub(crate) oauth: Option<oauth::OAuthConfig>,
     pub(crate) invitations_enabled: bool,
     pub(crate) oidc_exchange: Option<Rc<dyn accounts_oidc::OidcCodeExchange>>,
+    pub(crate) client_fetcher: Option<Rc<dyn crate::gateway::oauth_client::ClientMetadataFetch>>,
+    /// Set when this App serves the keys product instead of Waypost.
+    pub(crate) keys: Option<keys::KeysConfig>,
 }
 // SQL execution is sealed inside this crate; callers use supported runtimes and domain HTTP/MCP operations.
 #[allow(private_bounds)]
@@ -120,6 +124,8 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             oauth: None,
             invitations_enabled: true,
             oidc_exchange: None,
+            client_fetcher: None,
+            keys: None,
             db,
             objects,
             config,
@@ -217,6 +223,9 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         self
     }
     pub async fn handle(&self, request: Request) -> Response {
+        if self.keys.is_some() {
+            return self.keys_handle(request).await;
+        }
         if request.path == "/onboarding" && request.method == "GET" {
             return Response::json(
                 200,
@@ -261,7 +270,13 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             return self.admin_session(&request).await;
         }
         if request.path == "/mcp" {
-            let mut response = self.mcp(&request).await;
+            let mut response = crate::gateway::mcp::serve(
+                &mcp::WaypostTools(self),
+                &self.config.public_origin,
+                self.limits.max_json_bytes,
+                &request,
+            )
+            .await;
             self.oauth_challenge(&mut response);
             return response;
         }
@@ -435,18 +450,19 @@ impl<D: Database, O: ObjectStore> App<D, O> {
     // Both the initial authentication SELECT and final mutation guard use this
     // predicate against token alias t. No separate ownership lookup can go stale.
     fn oauth_authority_guard(&self, now: i64) -> (String, Vec<Sql>) {
-        let Some(config) = &self.oauth else {
+        if self.oauth.is_none() {
             return ("t.credential_kind='legacy'".into(), vec![]);
-        };
-        let clients = json!(
-            config
-                .clients
-                .iter()
-                .map(|c| &c.client_id)
-                .collect::<Vec<_>>()
+        }
+        let (clients, client_parameters) = self.client_guard("ofa.client_id");
+        let mut parameters = vec![self.oauth_resource().into()];
+        parameters.extend(client_parameters);
+        parameters.push(now.into());
+        (
+            format!(
+                "(t.credential_kind='legacy' OR (t.credential_kind='oauth' AND EXISTS(SELECT 1 FROM oauth_access_tokens oat JOIN oauth_families ofa ON ofa.family_id=oat.family_id JOIN accounts oac ON oac.account_id=ofa.account_id JOIN account_spaces oas ON oas.account_id=ofa.account_id AND oas.space_id=ofa.space_id WHERE oat.token_id=t.token_id AND ofa.space_id=t.space_id AND ofa.actor_id=t.actor_id AND ofa.consumer_id=t.consumer_id AND ofa.scope='waypost' AND ofa.resource=? AND {clients} AND ofa.revoked_at IS NULL AND ofa.expires_at>? AND oac.disabled=0 AND c.view='inbox')))"
+            ),
+            parameters,
         )
-        .to_string();
-        ("(t.credential_kind='legacy' OR (t.credential_kind='oauth' AND EXISTS(SELECT 1 FROM oauth_access_tokens oat JOIN oauth_families ofa ON ofa.family_id=oat.family_id JOIN accounts oac ON oac.account_id=ofa.account_id JOIN account_spaces oas ON oas.account_id=ofa.account_id AND oas.space_id=ofa.space_id WHERE oat.token_id=t.token_id AND ofa.space_id=t.space_id AND ofa.actor_id=t.actor_id AND ofa.consumer_id=t.consumer_id AND ofa.scope='waypost' AND ofa.resource=? AND ofa.client_id IN(SELECT value FROM json_each(?)) AND ofa.revoked_at IS NULL AND ofa.expires_at>? AND oac.disabled=0 AND c.view='inbox')))".into(),vec![self.oauth_resource().into(),clients.into(),now.into()])
     }
     pub(crate) fn authority_guard(&self, p: &Principal) -> (String, Vec<Sql>) {
         if p.owner_authority.is_some() {

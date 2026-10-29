@@ -55,6 +55,14 @@ pub const MIGRATIONS: &[(&str, &str)] = &[
         "0014_mcp_oauth.sql",
         include_str!("../../migrations/0014_mcp_oauth.sql"),
     ),
+    (
+        "0015_oauth_client_registry.sql",
+        include_str!("../../migrations/0015_oauth_client_registry.sql"),
+    ),
+    (
+        "0016_keys.sql",
+        include_str!("../../migrations/0016_keys.sql"),
+    ),
 ];
 
 #[cfg(test)]

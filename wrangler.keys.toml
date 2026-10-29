@@ -1,0 +1,38 @@
+# Local profile for the keys product (keyenv-remote): `wrangler dev --local
+# --config wrangler.keys.toml`. Secrets come from .dev.vars (never committed):
+# WAYPOST_OIDC_CONFIG, WAYPOST_CSRF_SECRET, WAYPOST_CURSOR_SECRET, KEYS_DATA_KEYS.
+# Production uses wrangler.keys.production.toml; see docs/design/0017-keys-product.md.
+name = "waypost-keys"
+main = "build/index.js"
+compatibility_date = "2026-07-17"
+workers_dev = true
+
+[build]
+command = "worker-build --release --no-default-features --features cloudflare"
+
+[vars]
+PUBLIC_ORIGIN = "http://127.0.0.1:8795"
+WAYPOST_PRODUCT = "keys"
+WAYPOST_OPERATOR_MODE = "disabled"
+WAYPOST_ACCOUNT_SIGNUP_LIMIT = "1"
+WAYPOST_OAUTH_CLIENTS = '{"client_id_metadata_documents":true,"dynamic_registration":true}'
+
+[[d1_databases]]
+binding = "DB"
+database_name = "waypost-keys"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+[[ratelimits]]
+name = "ADMIN_RATE_LIMITER"
+namespace_id = "2001"
+[ratelimits.simple]
+limit = 10
+period = 60
+
+[[ratelimits]]
+name = "API_RATE_LIMITER"
+namespace_id = "2002"
+[ratelimits.simple]
+limit = 300
+period = 60

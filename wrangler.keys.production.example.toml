@@ -1,0 +1,61 @@
+# Copy to wrangler.keys.production.toml (git-ignored) and fill in your own
+# account and D1 IDs. Intended hostname: https://keys.miles1150.top
+#
+# Secrets (set with `wrangler secret put --config wrangler.keys.production.toml`):
+#   WAYPOST_OIDC_CONFIG    Google OIDC client for https://keys.miles1150.top/account/callback
+#   WAYPOST_CSRF_SECRET    32+ random bytes
+#   WAYPOST_CURSOR_SECRET  32+ random bytes, different from the CSRF secret
+#   KEYS_DATA_KEYS         {"active":"k1","keys":{"k1":"<64 hex chars>"}}
+# Cloudflare can read these secrets: the store is not zero-knowledge.
+name = "waypost-keys-production"
+account_id = "replace-with-your-account-id"
+main = "build/index.js"
+compatibility_date = "2026-07-17"
+workers_dev = false
+preview_urls = false
+
+[build]
+command = "worker-build --release --no-default-features --features cloudflare"
+
+[vars]
+DEPLOYMENT_ENV = "production"
+PUBLIC_ORIGIN = "https://keys.miles1150.top"
+WAYPOST_PRODUCT = "keys"
+WAYPOST_OPERATOR_MODE = "disabled"
+# Only the owner's Google account may ever be created.
+WAYPOST_ACCOUNT_SIGNUP_LIMIT = "1"
+WAYPOST_OAUTH_CLIENTS = '{"client_id_metadata_documents":true,"dynamic_registration":true}'
+
+[[routes]]
+pattern = "keys.miles1150.top"
+custom_domain = true
+
+# Keep Worker error logs (route pattern, error code, request id only) but do not
+# record per-request invocation metadata for the secret store.
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+invocation_logs = false
+
+[[d1_databases]]
+binding = "DB"
+database_name = "waypost-keys-production"
+database_id = "replace-with-your-database-id"
+migrations_dir = "migrations"
+
+# Use namespaces unique to this application within your account.
+[[ratelimits]]
+name = "ADMIN_RATE_LIMITER"
+namespace_id = "2001"
+[ratelimits.simple]
+limit = 10
+period = 60
+
+[[ratelimits]]
+name = "API_RATE_LIMITER"
+namespace_id = "2002"
+[ratelimits.simple]
+limit = 120
+period = 60

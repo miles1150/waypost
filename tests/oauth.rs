@@ -83,6 +83,7 @@ impl Fixture {
                 ],
                 allow_loopback_port_variation: true,
             }],
+            ..Default::default()
         })
         .unwrap();
         let space = call(

@@ -1,123 +1,22 @@
+//! Worker entry. `WAYPOST_PRODUCT` selects the product (default `waypost`);
+//! the keys product shares the gateway, accounts and OAuth but no Waypost routes.
+use crate::gateway::cloudflare::{
+    D1Store, convert, error_response, harden, log_and_error, log_json_error, log_structured,
+    read_body,
+};
 use crate::{
     App, Config, Limits, Request, Response,
     error::{Error, Result},
     storage::{
-        ObjectInfo, ObjectStore,
-        driver::{Database, Row, Statement, Value as Sql, blob, integer, text},
+        NoObjects, ObjectInfo, ObjectStore,
+        driver::{Database, Statement, Value as Sql, blob, integer, text},
     },
 };
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
-use wasm_bindgen::JsValue;
-use worker::{
-    Bucket, Conditional, Context, D1DatabaseSession, D1PreparedStatement, D1Result, Env,
-    FixedLengthStream, HttpMetadata, event,
-};
+use worker::{Bucket, Conditional, Context, Env, FixedLengthStream, HttpMetadata, event};
 
-struct D1Store {
-    session: D1DatabaseSession,
-}
-impl D1Store {
-    fn prepare(&self, statement: Statement) -> Result<D1PreparedStatement> {
-        if statement.parameters.len() > 100 || statement.sql.len() > 100_000 {
-            return Err(Error::new(
-                "RESOURCE_LIMIT",
-                "Statement exceeds the D1 deployment limit.",
-            ));
-        }
-        let parameters = statement
-            .parameters
-            .into_iter()
-            .map(|v| match v {
-                Sql::Null => JsValue::NULL,
-                Sql::Text(s) => JsValue::from_str(&s),
-                Sql::Integer(n) => {
-                    if n.unsigned_abs() <= 9_007_199_254_740_991 {
-                        JsValue::from_f64(n as f64)
-                    } else {
-                        JsValue::from_str(&n.to_string())
-                    }
-                }
-                Sql::Blob(bytes) => js_sys::Uint8Array::from(bytes.as_slice()).into(),
-            })
-            .collect::<Vec<_>>();
-        self.session
-            .prepare(statement.sql)
-            .bind(&parameters)
-            .map_err(|_| Error::internal("D1 statement bindings"))
-    }
-}
-fn d1_error(error: worker::Error) -> Error {
-    let message = error.to_string().to_ascii_lowercase();
-    if [
-        "constraint",
-        "syntax error",
-        "no such table",
-        "no such column",
-        "datatype mismatch",
-        "bind",
-    ]
-    .iter()
-    .any(|label| message.contains(label))
-    {
-        Error::internal("D1 statement or schema")
-    } else {
-        Error::storage()
-    }
-}
-fn result_rows(result: D1Result) -> Result<Vec<Row>> {
-    if !result.success() {
-        return Err(Error::storage());
-    }
-    let rows = result
-        .results::<BTreeMap<String, Value>>()
-        .map_err(|_| Error::internal("D1 row decoding"))?;
-    rows.into_iter()
-        .map(|r| {
-            r.into_iter()
-                .map(|(name, value)| {
-                    let value = match value {
-                        Value::Null => Sql::Null,
-                        Value::String(s) => Sql::Text(s),
-                        Value::Number(n) => Sql::Integer(n.as_i64().ok_or_else(Error::storage)?),
-                        Value::Array(a) => Sql::Blob(
-                            a.into_iter()
-                                .map(|v| {
-                                    v.as_u64()
-                                        .filter(|v| *v <= 255)
-                                        .map(|v| v as u8)
-                                        .ok_or_else(Error::storage)
-                                })
-                                .collect::<Result<Vec<_>>>()?,
-                        ),
-                        _ => return Err(Error::storage()),
-                    };
-                    Ok((name, value))
-                })
-                .collect()
-        })
-        .collect()
-}
-impl Database for D1Store {
-    async fn query(&self, statement: Statement) -> Result<Vec<Row>> {
-        result_rows(self.prepare(statement)?.all().await.map_err(d1_error)?)
-    }
-    async fn batch(&self, statements: Vec<Statement>) -> Result<Vec<Vec<Row>>> {
-        let statements = statements
-            .into_iter()
-            .map(|s| self.prepare(s))
-            .collect::<Result<Vec<_>>>()?;
-        self.session
-            .batch(statements)
-            .await
-            .map_err(d1_error)?
-            .into_iter()
-            .map(result_rows)
-            .collect()
-    }
-}
 struct R2Store {
     bucket: Bucket,
 }
@@ -322,68 +221,6 @@ impl App<D1Store, R2Store> {
         Ok(response)
     }
 }
-fn error_response(error: Error) -> worker::Result<worker::Response> {
-    worker::Response::from_json(&json!({"ok":false,"error":error.value()}))
-        .map(|r| r.with_status(error.status()))
-}
-
-/// Error log line: error code, route, and request id. Nothing else.
-fn log_structured(route: &str, code: &str, request_id: Option<&str>) {
-    let error_code = if code.len() <= 64
-        && code
-            .bytes()
-            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_')
-    {
-        code
-    } else {
-        "INTERNAL_ERROR"
-    };
-    let route = if route.len() <= 160
-        && route.bytes().all(|c| {
-            c.is_ascii_alphanumeric() || matches!(c, b' ' | b'/' | b':' | b'_' | b'-' | b'.')
-        }) {
-        route
-    } else {
-        "UNKNOWN /unknown"
-    };
-    let request_id = request_id.filter(|id| crate::domain::check_request_id(id).is_ok());
-    let line = serde_json::to_string(&json!({
-        "error_code": error_code,
-        "route": route,
-        "request_id": request_id,
-    }))
-    .unwrap_or_else(|_| {
-        r#"{"error_code":"INTERNAL_ERROR","route":"UNKNOWN /unknown","request_id":null}"#.into()
-    });
-    worker::console_error!("{}", line);
-}
-
-fn log_and_error(route: &str, error: Error) -> worker::Result<worker::Response> {
-    log_structured(route, error.code, None);
-    error_response(error)
-}
-
-fn log_json_error(route: &str, body: &[u8]) {
-    let parsed = serde_json::from_slice::<Value>(body).ok();
-    let code = parsed
-        .as_ref()
-        .and_then(|value| value.get("error"))
-        .and_then(|error| error.get("code"))
-        .and_then(Value::as_str)
-        .unwrap_or("INTERNAL_ERROR");
-    let request_id = parsed
-        .as_ref()
-        .and_then(|value| value.get("request_id"))
-        .and_then(Value::as_str);
-    log_structured(route, code, request_id);
-}
-fn convert(response: Response) -> worker::Result<worker::Response> {
-    let mut r = worker::Response::from_bytes(response.body)?.with_status(response.status);
-    for (k, v) in response.headers {
-        r.headers_mut().set(&k, &v)?;
-    }
-    Ok(r)
-}
 #[event(fetch)]
 pub async fn fetch(
     raw: worker::Request,
@@ -398,68 +235,46 @@ pub async fn fetch(
         }
     };
     let route_name = crate::http::route_label(raw.method().as_ref(), &raw.path());
-    let mut response = match handle_fetch(raw, env).await {
+    let product = env
+        .var("WAYPOST_PRODUCT")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|_| "waypost".into());
+    let result = match product.as_str() {
+        "waypost" => handle_fetch(raw, env).await,
+        "keys" => handle_keys_fetch(raw, env).await,
+        _ => log_and_error(&route_name, Error::internal("product configuration")),
+    };
+    let mut response = match result {
         Ok(response) => response,
         Err(_) => log_and_error(&route_name, Error::internal("worker request boundary"))?,
     };
-    for (name, value) in [
-        ("cache-control", "no-store"),
-        ("x-content-type-options", "nosniff"),
-        ("referrer-policy", "no-referrer"),
-    ] {
-        response.headers_mut().set(name, value)?;
-    }
-    if https {
-        response
-            .headers_mut()
-            .set("strict-transport-security", "max-age=31536000")?;
-    }
+    harden(&mut response, https)?;
     Ok(response)
 }
 
-async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<worker::Response> {
+/// Origin, rate limits and shared account/OAuth/signing configuration. Returns
+/// the configured App, or the response to send instead.
+async fn prepare<D: Database, O: ObjectStore>(
+    raw: &worker::Request,
+    env: &Env,
+    app: App<D, O>,
+    operator_mode: &str,
+    production: bool,
+) -> std::result::Result<App<D, O>, worker::Result<worker::Response>> {
     let route_name = crate::http::route_label(raw.method().as_ref(), &raw.path());
-    let production = env
-        .var("DEPLOYMENT_ENV")
-        .is_ok_and(|value| value.to_string() == "production");
-    let operator_mode = env
-        .var("WAYPOST_OPERATOR_MODE")
-        .map(|v| v.to_string())
-        .unwrap_or_else(|_| "enabled".into());
-    if !["enabled", "disabled"].contains(&operator_mode.as_str()) {
-        return log_and_error(&route_name, Error::internal("operator configuration"));
-    }
-    let config = Config {
-        admin_secret: if operator_mode == "disabled" {
-            env.secret("WAYPOST_ADMIN_SECRET")
-                .map(|v| v.to_string())
-                .unwrap_or_default()
-        } else {
-            env.secret("WAYPOST_ADMIN_SECRET")?.to_string()
-        },
-        public_origin: env.var("PUBLIC_ORIGIN")?.to_string(),
-    };
-    let origin = worker::Url::parse(&config.public_origin)
-        .map_err(|_| worker::Error::from("Invalid public origin"))?;
-    if (operator_mode != "disabled" && config.admin_secret.len() < 32)
-        || !matches!(origin.scheme(), "http" | "https")
-        || origin.origin().ascii_serialization() != config.public_origin
-        || (production && origin.scheme() != "https")
-    {
-        return log_and_error(&route_name, Error::internal("worker configuration"));
-    }
-    if raw
-        .headers()
-        .get("origin")?
-        .is_some_and(|value| value != config.public_origin)
-    {
-        return log_and_error(&route_name, Error::forbidden());
+    let fail = |label: &'static str| Err(log_and_error(&route_name, Error::internal(label)));
+    match raw.headers().get("origin") {
+        Ok(Some(value)) if value != app.config.public_origin => {
+            return Err(log_and_error(&route_name, Error::forbidden()));
+        }
+        Err(e) => return Err(Err(e)),
+        _ => {}
     }
     // Production must not silently omit abuse controls when a binding is missing.
     let admin_limiter = env.rate_limiter("ADMIN_RATE_LIMITER");
     let api_limiter = env.rate_limiter("API_RATE_LIMITER");
     if production && (admin_limiter.is_err() || api_limiter.is_err()) {
-        return log_and_error(&route_name, Error::internal("worker configuration"));
+        return fail("worker configuration");
     }
     let path = raw.path();
     let route = crate::http::classify(raw.method().as_ref(), &path);
@@ -478,46 +293,32 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
         api_limiter.ok()
     };
     if let Some(limiter) = limiter {
-        let ip = raw
-            .headers()
-            .get("cf-connecting-ip")?
-            .unwrap_or_else(|| "local".into());
-        let outcome = limiter
+        let ip = match raw.headers().get("cf-connecting-ip") {
+            Ok(ip) => ip.unwrap_or_else(|| "local".into()),
+            Err(e) => return Err(Err(e)),
+        };
+        let outcome = match limiter
             .limit(format!("ip:{}", hex::encode(Sha256::digest(ip.as_bytes()))))
-            .await?;
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(e) => return Err(Err(e)),
+        };
         if !outcome.success {
             if path.starts_with("/oauth/") {
                 log_structured(&route_name, "RATE_LIMITED", None);
-                return convert(crate::service::oauth::rate_limited_response());
+                return Err(convert(crate::service::oauth::rate_limited_response()));
             }
-            let mut response = log_and_error(
+            return Err(log_and_error(
                 &route_name,
                 Error::new("RATE_LIMITED", "Request rate limit exceeded; retry later."),
-            )?;
-            response.headers_mut().set("retry-after", "60")?;
-            return Ok(response);
+            )
+            .and_then(|mut response| {
+                response.headers_mut().set("retry-after", "60")?;
+                Ok(response)
+            }));
         }
     }
-    let database = env.d1("DB")?;
-    let session = database.with_session(Some("first-primary"))?;
-    // Conservative Free-tier profile. Public describe reports these exact limits.
-    let limits = Limits {
-        max_json_bytes: 16384,
-        max_blob_bytes: 256 * 1024,
-        max_message_attachments: 4,
-        max_inline_memory_changes: 8,
-        max_manifest_memory_changes: 8,
-        max_collection_items: 32,
-        max_page_size: 20,
-    };
-    let app = App::new(
-        D1Store { session },
-        R2Store {
-            bucket: env.bucket("OBJECTS")?,
-        },
-        config,
-    )
-    .with_limits(limits);
     let app = if let Ok(raw_config) = env.secret("WAYPOST_OIDC_CONFIG") {
         let configured: Result<_> = (|| {
             let config: crate::service::accounts_oidc::OidcConfig =
@@ -534,7 +335,7 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
         })();
         match configured {
             Ok(app) => app,
-            Err(_) => return log_and_error(&route_name, Error::internal("OIDC configuration")),
+            Err(_) => return fail("OIDC configuration"),
         }
     } else {
         app
@@ -545,10 +346,148 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
             .and_then(|config| app.with_oauth(config));
         match configured {
             Ok(app) => app,
-            Err(_) => return log_and_error(&route_name, Error::internal("OAuth configuration")),
+            Err(_) => return fail("OAuth configuration"),
         }
     } else {
         app
+    };
+    let app = if let Ok(secret) = env.secret("WAYPOST_CURSOR_SECRET") {
+        match app.with_cursor_secret(&secret.to_string()) {
+            Ok(app) => app,
+            Err(_) => return fail("worker cursor key configuration"),
+        }
+    } else {
+        app
+    };
+    let app = if let Ok(secret) = env.secret("WAYPOST_CSRF_SECRET") {
+        match app.with_csrf_secret(&secret.to_string()) {
+            Ok(app) => app,
+            Err(_) => return fail("worker CSRF key configuration"),
+        }
+    } else {
+        app
+    };
+    match app.with_operator_mode(operator_mode) {
+        Ok(app) => Ok(app),
+        Err(_) => fail("operator configuration"),
+    }
+}
+
+fn worker_config(env: &Env, operator_mode: &str, production: bool) -> worker::Result<Config> {
+    let config = Config {
+        admin_secret: if operator_mode == "disabled" {
+            env.secret("WAYPOST_ADMIN_SECRET")
+                .map(|v| v.to_string())
+                .unwrap_or_default()
+        } else {
+            env.secret("WAYPOST_ADMIN_SECRET")?.to_string()
+        },
+        public_origin: env.var("PUBLIC_ORIGIN")?.to_string(),
+    };
+    let origin = worker::Url::parse(&config.public_origin)
+        .map_err(|_| worker::Error::from("Invalid public origin"))?;
+    if (operator_mode != "disabled" && config.admin_secret.len() < 32)
+        || !matches!(origin.scheme(), "http" | "https")
+        || origin.origin().ascii_serialization() != config.public_origin
+        || (production && origin.scheme() != "https")
+    {
+        return Err(worker::Error::from("worker configuration"));
+    }
+    Ok(config)
+}
+
+fn operator_mode(env: &Env) -> String {
+    env.var("WAYPOST_OPERATOR_MODE")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|_| "enabled".into())
+}
+
+/// The keys product: D1 only (no R2), its own body limit and data keyring.
+async fn handle_keys_fetch(mut raw: worker::Request, env: Env) -> worker::Result<worker::Response> {
+    let route_name = crate::http::route_label(raw.method().as_ref(), &raw.path());
+    let production = env
+        .var("DEPLOYMENT_ENV")
+        .is_ok_and(|value| value.to_string() == "production");
+    let operator_mode = operator_mode(&env);
+    if operator_mode != "disabled" {
+        // The keys product has no operator routes; never accept an operator credential.
+        return log_and_error(&route_name, Error::internal("operator configuration"));
+    }
+    let Ok(config) = worker_config(&env, &operator_mode, production) else {
+        return log_and_error(&route_name, Error::internal("worker configuration"));
+    };
+    let database = env.d1("DB")?;
+    let session = database.with_session(Some("first-primary"))?;
+    let app = App::new(D1Store::new(session), NoObjects, config);
+    let app = match prepare(&raw, &env, app, &operator_mode, production).await {
+        Ok(app) => app,
+        Err(response) => return response,
+    };
+    let app = match env.secret("KEYS_DATA_KEYS") {
+        Ok(keys) => match app.with_keys(&keys.to_string()) {
+            Ok(app) => app,
+            Err(_) => return log_and_error(&route_name, Error::internal("keys configuration")),
+        },
+        Err(_) => return log_and_error(&route_name, Error::internal("keys keyring missing")),
+    };
+    if app.validate_runtime_auth().is_err() {
+        return log_and_error(&route_name, Error::internal("operator configuration"));
+    }
+    let body = match read_body(&mut raw, app.limits.max_json_bytes).await {
+        Ok(body) => body,
+        Err(e) => return log_and_error(&route_name, e),
+    };
+    let request = Request {
+        method: raw.method().to_string(),
+        path: raw.path(),
+        query: raw.url()?.query().unwrap_or("").to_owned(),
+        headers: raw.headers().entries().collect(),
+        body,
+    };
+    let response = app.handle(request).await;
+    if response.status >= 400 {
+        log_json_error(&route_name, &response.body);
+    }
+    convert(response)
+}
+
+async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<worker::Response> {
+    let route_name = crate::http::route_label(raw.method().as_ref(), &raw.path());
+    let production = env
+        .var("DEPLOYMENT_ENV")
+        .is_ok_and(|value| value.to_string() == "production");
+    let operator_mode = operator_mode(&env);
+    if !["enabled", "disabled"].contains(&operator_mode.as_str()) {
+        return log_and_error(&route_name, Error::internal("operator configuration"));
+    }
+    let Ok(config) = worker_config(&env, &operator_mode, production) else {
+        return log_and_error(&route_name, Error::internal("worker configuration"));
+    };
+    let path = raw.path();
+    let route = crate::http::classify(raw.method().as_ref(), &path);
+    let database = env.d1("DB")?;
+    let session = database.with_session(Some("first-primary"))?;
+    // Conservative Free-tier profile. Public describe reports these exact limits.
+    let limits = Limits {
+        max_json_bytes: 16384,
+        max_blob_bytes: 256 * 1024,
+        max_message_attachments: 4,
+        max_inline_memory_changes: 8,
+        max_manifest_memory_changes: 8,
+        max_collection_items: 32,
+        max_page_size: 20,
+    };
+    let app = App::new(
+        D1Store::new(session),
+        R2Store {
+            bucket: env.bucket("OBJECTS")?,
+        },
+        config,
+    )
+    .with_limits(limits);
+    let app = match prepare(&raw, &env, app, &operator_mode, production).await {
+        Ok(app) => app,
+        Err(response) => return response,
     };
     let onboarding = env
         .var("WAYPOST_ONBOARDING_MODE")
@@ -557,36 +496,6 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
     let app = match app.with_onboarding_mode(&onboarding) {
         Ok(app) => app,
         Err(_) => return log_and_error(&route_name, Error::internal("onboarding configuration")),
-    };
-    let app = if let Ok(secret) = env.secret("WAYPOST_CURSOR_SECRET") {
-        match app.with_cursor_secret(&secret.to_string()) {
-            Ok(app) => app,
-            Err(_) => {
-                return log_and_error(
-                    &route_name,
-                    Error::internal("worker cursor key configuration"),
-                );
-            }
-        }
-    } else {
-        app
-    };
-    let app = if let Ok(secret) = env.secret("WAYPOST_CSRF_SECRET") {
-        match app.with_csrf_secret(&secret.to_string()) {
-            Ok(app) => app,
-            Err(_) => {
-                return log_and_error(
-                    &route_name,
-                    Error::internal("worker CSRF key configuration"),
-                );
-            }
-        }
-    } else {
-        app
-    };
-    let app = match app.with_operator_mode(&operator_mode) {
-        Ok(app) => app,
-        Err(_) => return log_and_error(&route_name, Error::internal("operator configuration")),
     };
     let app = if let Ok(keys) = env.secret("WAYPOST_ENCRYPTION_KEYS") {
         let legacy = env

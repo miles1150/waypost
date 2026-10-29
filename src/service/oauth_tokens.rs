@@ -51,6 +51,38 @@ const LIVE_FAMILY: &str = "f.revoked_at IS NULL AND f.expires_at>? AND EXISTS(SE
 // Alias q is the original approved authorization request.
 const LIVE_REQUEST: &str = "EXISTS(SELECT 1 FROM accounts a JOIN account_spaces m ON m.account_id=a.account_id JOIN actors x ON x.space_id=m.space_id JOIN consumers c ON c.space_id=x.space_id AND c.actor_id=x.actor_id WHERE a.account_id=q.account_id AND m.space_id=q.space_id AND x.actor_id=q.actor_id AND c.consumer_id=q.consumer_id AND a.disabled=0 AND x.disabled=0 AND c.disabled=0 AND c.view='inbox')";
 
+// Keys product: the grant is a consent record of an enabled account. Alias f/q as above.
+const KEYS_LIVE_FAMILY: &str = "f.revoked_at IS NULL AND f.expires_at>? AND EXISTS(SELECT 1 FROM accounts a JOIN key_consents k ON k.account_id=a.account_id WHERE a.account_id=f.account_id AND k.request_id=f.request_id AND a.disabled=0)";
+const KEYS_LIVE_REQUEST: &str = "EXISTS(SELECT 1 FROM accounts a JOIN key_consents k ON k.account_id=a.account_id WHERE a.account_id=q.account_id AND k.request_id=q.request_id AND a.disabled=0)";
+
+/// Product-specific grant storage. The token state machine is shared; each
+/// product keeps its own family, refresh and access-token tables, so a token
+/// issued for one product can never be looked up by the other.
+struct GrantSql {
+    families: &'static str,
+    refresh: &'static str,
+    live_family: &'static str,
+    live_request: &'static str,
+    access_prefix: &'static str,
+    refresh_prefix: &'static str,
+}
+const WAYPOST_GRANTS: GrantSql = GrantSql {
+    families: "oauth_families",
+    refresh: "oauth_refresh_tokens",
+    live_family: LIVE_FAMILY,
+    live_request: LIVE_REQUEST,
+    access_prefix: "wpo_",
+    refresh_prefix: "wpr_",
+};
+const KEYS_GRANTS: GrantSql = GrantSql {
+    families: "key_oauth_families",
+    refresh: "key_oauth_refresh_tokens",
+    live_family: KEYS_LIVE_FAMILY,
+    live_request: KEYS_LIVE_REQUEST,
+    access_prefix: "kso_",
+    refresh_prefix: "ksr_",
+};
+
 fn revoke_queries(selector: &str, args: Vec<Sql>, now: i64) -> Vec<Statement> {
     let mut first = vec![now.into()];
     first.extend(args.clone());
@@ -73,15 +105,37 @@ fn revoke_queries(selector: &str, args: Vec<Sql>, now: i64) -> Vec<Statement> {
 }
 
 impl<D: Database, O: ObjectStore> App<D, O> {
+    fn grants(&self) -> &'static GrantSql {
+        if self.keys.is_some() {
+            &KEYS_GRANTS
+        } else {
+            &WAYPOST_GRANTS
+        }
+    }
+    fn family_revocation(&self, selector: &str, args: Vec<Sql>, now: i64) -> Vec<Statement> {
+        if self.keys.is_none() {
+            return revoke_queries(selector, args, now);
+        }
+        // Keys access tokens are valid only while their family is live.
+        let mut first = vec![now.into()];
+        first.extend(args);
+        vec![Statement::new(
+            format!(
+                "UPDATE key_oauth_families SET revoked_at=COALESCE(revoked_at,?) WHERE family_id IN ({selector})"
+            ),
+            first,
+        )]
+    }
     pub(super) async fn oauth_token(&self, p: BTreeMap<String, String>) -> Result<Value> {
         let client = required(&p, "client_id")?;
-        self.oauth_client(client)?;
+        self.client_allowed(client).await?;
         let resource = required(&p, "resource")?;
         if resource != self.oauth_resource() {
             return Err(oauth_error("invalid_target"));
         }
-        if p.get("scope").is_some_and(|s| s != "waypost") {
-            return Err(oauth_error("invalid_scope"));
+        // A scope parameter may restate, never widen: issued scope is the grant's.
+        if let Some(scope) = p.get("scope") {
+            self.normalize_scope(Some(scope))?;
         }
         match required(&p, "grant_type")? {
             "authorization_code" => {
@@ -101,7 +155,11 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                 opaque(code)?;
                 let challenge = verifier(required(&p, "code_verifier")?)?;
                 let redirect = required(&p, "redirect_uri")?;
-                if !self.oauth_client(client)?.accepts_redirect(redirect) {
+                if !self
+                    .resolve_client(client)
+                    .await?
+                    .accepts_redirect(redirect)
+                {
                     return Err(oauth_error("invalid_grant"));
                 }
                 let now = self.clock.now_ms();
@@ -114,11 +172,12 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                     redirect.into(),
                     challenge.clone().into(),
                 ];
-                let mut queries = revoke_queries(selector, tuple.clone(), now);
+                let mut queries = self.family_revocation(selector, tuple.clone(), now);
                 let mut claim = vec![nonce.clone().into()];
                 claim.extend(tuple);
                 claim.push(now.into());
-                queries.push(Statement::new(format!("UPDATE oauth_requests AS q SET status='consumed',claim_nonce=? WHERE kind='code' AND code_digest=? AND client_id=? AND resource=? AND redirect_uri=? AND code_challenge=? AND status='approved' AND expires_at>? AND {LIVE_REQUEST}"),claim));
+                let live = self.grants().live_request;
+                queries.push(Statement::new(format!("UPDATE oauth_requests AS q SET status='consumed',claim_nonce=? WHERE kind='code' AND code_digest=? AND client_id=? AND resource=? AND redirect_uri=? AND code_challenge=? AND status='approved' AND expires_at>? AND {live}"),claim));
                 self.issue_request(queries, &nonce, now).await
             }
             "refresh_token" => {
@@ -135,7 +194,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                 self.rotate_refresh(client, resource, required(&p, "refresh_token")?)
                     .await
             }
-            "urn:ietf:params:oauth:grant-type:device_code" => {
+            "urn:ietf:params:oauth:grant-type:device_code" if self.oauth_profile().device_grant => {
                 fields(
                     &p,
                     &[
@@ -158,48 +217,77 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         nonce: &str,
         now: i64,
     ) -> Result<Value> {
+        let grants = self.grants();
         let family = random_id("grant")?;
-        let token_id = random_id("token")?;
-        let access = secret("wpo_")?;
-        let refresh = secret("wpr_")?;
-        queries.push(Statement::new("INSERT INTO oauth_families(family_id,client_id,resource,scope,account_id,space_id,actor_id,consumer_id,created_at,expires_at) SELECT ?,client_id,resource,scope,account_id,space_id,actor_id,consumer_id,?,? FROM oauth_requests WHERE claim_nonce=? AND status='consumed'",vec![family.clone().into(),now.into(),(now+FAMILY_MS).into(),nonce.into()]));
-        queries.push(Statement::new("UPDATE oauth_requests SET family_id=? WHERE claim_nonce=? AND status='consumed' AND EXISTS(SELECT 1 FROM oauth_families WHERE family_id=?)",vec![family.clone().into(),nonce.into(),family.clone().into()]));
-        queries.push(Statement::new("INSERT INTO tokens(token_id,token_digest,space_id,actor_id,consumer_id,expires_at,created_at,credential_kind) SELECT ?,?,space_id,actor_id,consumer_id,?,?,'oauth' FROM oauth_families WHERE family_id=? RETURNING token_id",vec![token_id.clone().into(),digest(&access),(now+ACCESS_MS).into(),now.into(),family.clone().into()]));
-        let result_index = queries.len() - 1;
-        queries.push(Statement::new("INSERT INTO oauth_access_tokens(token_id,family_id) SELECT token_id,? FROM tokens WHERE token_id=?",vec![family.clone().into(),token_id.into()]));
-        queries.push(Statement::new("INSERT INTO oauth_refresh_tokens(token_digest,family_id,expires_at) SELECT ?,family_id,expires_at FROM oauth_families WHERE family_id=?",vec![digest(&refresh),family.into()]));
-        let results = self.db.batch(queries).await?;
-        if results[result_index].is_empty() {
-            return Err(oauth_error("invalid_grant"));
+        let access = secret(grants.access_prefix)?;
+        let refresh = secret(grants.refresh_prefix)?;
+        let result_index;
+        if self.keys.is_some() {
+            queries.push(Statement::new("INSERT INTO key_oauth_families(family_id,request_id,client_id,resource,scope,account_id,created_at,expires_at) SELECT ?,request_id,client_id,resource,scope,account_id,?,? FROM oauth_requests WHERE claim_nonce=? AND status='consumed'",vec![family.clone().into(),now.into(),(now+FAMILY_MS).into(),nonce.into()]));
+            queries.push(Statement::new("UPDATE oauth_requests SET family_id=? WHERE claim_nonce=? AND status='consumed' AND EXISTS(SELECT 1 FROM key_oauth_families WHERE family_id=?)",vec![family.clone().into(),nonce.into(),family.clone().into()]));
+            queries.push(Statement::new("INSERT INTO key_access_tokens(token_digest,family_id,scope,expires_at,created_at) SELECT ?,family_id,scope,?,? FROM key_oauth_families WHERE family_id=? RETURNING scope",vec![digest(&access),(now+ACCESS_MS).into(),now.into(),family.clone().into()]));
+            result_index = queries.len() - 1;
+            queries.push(Statement::new("INSERT INTO key_oauth_refresh_tokens(token_digest,family_id,expires_at) SELECT ?,family_id,expires_at FROM key_oauth_families WHERE family_id=?",vec![digest(&refresh),family.into()]));
+        } else {
+            let token_id = random_id("token")?;
+            queries.push(Statement::new("INSERT INTO oauth_families(family_id,client_id,resource,scope,account_id,space_id,actor_id,consumer_id,created_at,expires_at) SELECT ?,client_id,resource,scope,account_id,space_id,actor_id,consumer_id,?,? FROM oauth_requests WHERE claim_nonce=? AND status='consumed'",vec![family.clone().into(),now.into(),(now+FAMILY_MS).into(),nonce.into()]));
+            queries.push(Statement::new("UPDATE oauth_requests SET family_id=? WHERE claim_nonce=? AND status='consumed' AND EXISTS(SELECT 1 FROM oauth_families WHERE family_id=?)",vec![family.clone().into(),nonce.into(),family.clone().into()]));
+            queries.push(Statement::new("INSERT INTO tokens(token_id,token_digest,space_id,actor_id,consumer_id,expires_at,created_at,credential_kind) SELECT ?,?,space_id,actor_id,consumer_id,?,?,'oauth' FROM oauth_families WHERE family_id=? RETURNING token_id",vec![token_id.clone().into(),digest(&access),(now+ACCESS_MS).into(),now.into(),family.clone().into()]));
+            result_index = queries.len() - 1;
+            queries.push(Statement::new("INSERT INTO oauth_access_tokens(token_id,family_id) SELECT token_id,? FROM tokens WHERE token_id=?",vec![family.clone().into(),token_id.into()]));
+            queries.push(Statement::new("INSERT INTO oauth_refresh_tokens(token_digest,family_id,expires_at) SELECT ?,family_id,expires_at FROM oauth_families WHERE family_id=?",vec![digest(&refresh),family.into()]));
         }
+        let results = self.db.batch(queries).await?;
+        let Some(row) = results[result_index].first() else {
+            return Err(oauth_error("invalid_grant"));
+        };
+        let scope = if self.keys.is_some() {
+            text(row, "scope")?
+        } else {
+            "waypost".into()
+        };
         Ok(
-            json!({"access_token":access,"token_type":"Bearer","expires_in":ACCESS_MS/1000,"refresh_token":refresh,"scope":"waypost"}),
+            json!({"access_token":access,"token_type":"Bearer","expires_in":ACCESS_MS/1000,"refresh_token":refresh,"scope":scope}),
         )
     }
     async fn rotate_refresh(&self, client: &str, resource: &str, raw: &str) -> Result<Value> {
         opaque(raw)?;
+        let grants = self.grants();
+        let (families, refresh_table, live) = (grants.families, grants.refresh, grants.live_family);
         let now = self.clock.now_ms();
         let nonce = random_id("refresh")?;
-        let selector = "SELECT r.family_id FROM oauth_refresh_tokens r JOIN oauth_families f ON f.family_id=r.family_id WHERE r.token_digest=? AND f.client_id=? AND f.resource=? AND r.used_at IS NOT NULL";
-        let mut q = revoke_queries(
-            selector,
+        let selector = format!(
+            "SELECT r.family_id FROM {refresh_table} r JOIN {families} f ON f.family_id=r.family_id WHERE r.token_digest=? AND f.client_id=? AND f.resource=? AND r.used_at IS NOT NULL"
+        );
+        let mut q = self.family_revocation(
+            &selector,
             vec![digest(raw), client.into(), resource.into()],
             now,
         );
-        q.push(Statement::new(format!("UPDATE oauth_refresh_tokens SET used_at=?,redeem_nonce=? WHERE token_digest=? AND used_at IS NULL AND expires_at>? AND EXISTS(SELECT 1 FROM oauth_families f WHERE f.family_id=oauth_refresh_tokens.family_id AND f.client_id=? AND f.resource=? AND {LIVE_FAMILY})"),vec![now.into(),nonce.clone().into(),digest(raw),now.into(),client.into(),resource.into(),now.into()]));
-        let token_id = random_id("token")?;
-        let access = secret("wpo_")?;
-        let refresh = secret("wpr_")?;
+        q.push(Statement::new(format!("UPDATE {refresh_table} SET used_at=?,redeem_nonce=? WHERE token_digest=? AND used_at IS NULL AND expires_at>? AND EXISTS(SELECT 1 FROM {families} f WHERE f.family_id={refresh_table}.family_id AND f.client_id=? AND f.resource=? AND {live})"),vec![now.into(),nonce.clone().into(),digest(raw),now.into(),client.into(),resource.into(),now.into()]));
+        let access = secret(grants.access_prefix)?;
+        let refresh = secret(grants.refresh_prefix)?;
+        let result_index = q.len();
         // The old digest remains for replay detection. The family has an absolute expiry.
-        q.push(Statement::new("INSERT INTO tokens(token_id,token_digest,space_id,actor_id,consumer_id,expires_at,created_at,credential_kind) SELECT ?,?,f.space_id,f.actor_id,f.consumer_id,MIN(?,f.expires_at),?,'oauth' FROM oauth_refresh_tokens r JOIN oauth_families f ON f.family_id=r.family_id WHERE r.redeem_nonce=? RETURNING expires_at",vec![token_id.clone().into(),digest(&access),(now+ACCESS_MS).into(),now.into(),nonce.clone().into()]));
-        q.push(Statement::new("INSERT INTO oauth_access_tokens(token_id,family_id) SELECT ?,family_id FROM oauth_refresh_tokens WHERE redeem_nonce=?",vec![token_id.into(),nonce.clone().into()]));
-        q.push(Statement::new("INSERT INTO oauth_refresh_tokens(token_digest,family_id,expires_at) SELECT ?,family_id,expires_at FROM oauth_refresh_tokens WHERE redeem_nonce=?",vec![digest(&refresh),nonce.into()]));
+        if self.keys.is_some() {
+            q.push(Statement::new("INSERT INTO key_access_tokens(token_digest,family_id,scope,expires_at,created_at) SELECT ?,f.family_id,f.scope,MIN(?,f.expires_at),? FROM key_oauth_refresh_tokens r JOIN key_oauth_families f ON f.family_id=r.family_id WHERE r.redeem_nonce=? RETURNING expires_at,scope",vec![digest(&access),(now+ACCESS_MS).into(),now.into(),nonce.clone().into()]));
+        } else {
+            let token_id = random_id("token")?;
+            q.push(Statement::new("INSERT INTO tokens(token_id,token_digest,space_id,actor_id,consumer_id,expires_at,created_at,credential_kind) SELECT ?,?,f.space_id,f.actor_id,f.consumer_id,MIN(?,f.expires_at),?,'oauth' FROM oauth_refresh_tokens r JOIN oauth_families f ON f.family_id=r.family_id WHERE r.redeem_nonce=? RETURNING expires_at",vec![token_id.clone().into(),digest(&access),(now+ACCESS_MS).into(),now.into(),nonce.clone().into()]));
+            q.push(Statement::new("INSERT INTO oauth_access_tokens(token_id,family_id) SELECT ?,family_id FROM oauth_refresh_tokens WHERE redeem_nonce=?",vec![token_id.into(),nonce.clone().into()]));
+        }
+        q.push(Statement::new(format!("INSERT INTO {refresh_table}(token_digest,family_id,expires_at) SELECT ?,family_id,expires_at FROM {refresh_table} WHERE redeem_nonce=?"),vec![digest(&refresh),nonce.into()]));
         let rows = self.db.batch(q).await?;
-        let row = rows[3]
+        let row = rows[result_index]
             .first()
             .ok_or_else(|| oauth_error("invalid_grant"))?;
+        let scope = if self.keys.is_some() {
+            text(row, "scope")?
+        } else {
+            "waypost".into()
+        };
         Ok(
-            json!({"access_token":access,"token_type":"Bearer","expires_in":(integer(row,"expires_at")?-now)/1000,"refresh_token":refresh,"scope":"waypost"}),
+            json!({"access_token":access,"token_type":"Bearer","expires_in":(integer(row,"expires_at")?-now)/1000,"refresh_token":refresh,"scope":scope}),
         )
     }
     async fn redeem_device(&self, client: &str, resource: &str, raw: &str) -> Result<Value> {
@@ -276,15 +364,19 @@ impl<D: Database, O: ObjectStore> App<D, O> {
     pub(super) async fn oauth_revoke(&self, p: BTreeMap<String, String>) -> Result<Value> {
         fields(&p, &["client_id", "token", "token_type_hint"])?;
         let client = required(&p, "client_id")?;
-        self.oauth_client(client)?;
+        self.client_allowed(client).await?;
         let raw = required(&p, "token")?;
         // Unknown tokens return the same success; neither discovery nor oracle response.
         if raw.len() > 512 {
             return Ok(json!({}));
         }
-        let selector = "SELECT f.family_id FROM oauth_families f WHERE f.client_id=? AND (EXISTS(SELECT 1 FROM oauth_refresh_tokens r WHERE r.family_id=f.family_id AND r.token_digest=?) OR EXISTS(SELECT 1 FROM oauth_access_tokens a JOIN tokens t ON t.token_id=a.token_id WHERE a.family_id=f.family_id AND t.token_digest=?))";
+        let selector = if self.keys.is_some() {
+            "SELECT f.family_id FROM key_oauth_families f WHERE f.client_id=? AND (EXISTS(SELECT 1 FROM key_oauth_refresh_tokens r WHERE r.family_id=f.family_id AND r.token_digest=?) OR EXISTS(SELECT 1 FROM key_access_tokens a WHERE a.family_id=f.family_id AND a.token_digest=?))"
+        } else {
+            "SELECT f.family_id FROM oauth_families f WHERE f.client_id=? AND (EXISTS(SELECT 1 FROM oauth_refresh_tokens r WHERE r.family_id=f.family_id AND r.token_digest=?) OR EXISTS(SELECT 1 FROM oauth_access_tokens a JOIN tokens t ON t.token_id=a.token_id WHERE a.family_id=f.family_id AND t.token_digest=?))"
+        };
         self.db
-            .batch(revoke_queries(
+            .batch(self.family_revocation(
                 selector,
                 vec![client.into(), digest(raw), digest(raw)],
                 self.clock.now_ms(),
@@ -369,6 +461,7 @@ pub(super) mod tests {
                     allow_loopback_port_variation: false,
                 },
             ],
+            ..Default::default()
         });
         let response = app
             .handle(Request::json(

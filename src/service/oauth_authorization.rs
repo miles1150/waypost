@@ -87,13 +87,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         if resource != self.oauth_resource() {
             return Err(oauth_error("invalid_target"));
         }
-        let scope = params
-            .get("scope")
-            .cloned()
-            .unwrap_or_else(|| "waypost".into());
-        if scope != "waypost" {
-            return Err(oauth_error("invalid_scope"));
-        }
+        let scope = self.normalize_scope(params.get("scope").map(String::as_str))?;
         Ok((resource, scope))
     }
     pub(super) async fn oauth_authorize(
@@ -105,8 +99,9 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             return Err(oauth_error("invalid_request"));
         }
         let client_id = parameter(&params, "client_id")?;
-        let client = self.oauth_client(&client_id)?;
+        let client = self.resolve_client(&client_id).await?;
         let redirect = parameter(&params, "redirect_uri")?;
+        // Never redirect errors to an unvalidated or subsequently changed client URI.
         if !client.accepts_redirect(&redirect) {
             return Err(oauth_error("invalid_request"));
         }
@@ -117,7 +112,10 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         {
             return Err(oauth_error("invalid_request"));
         }
-        match self.oauth_authorize_validated(request, params).await {
+        match self
+            .oauth_authorize_validated(&client_id, &redirect, state.clone(), &params)
+            .await
+        {
             Ok(response) => Ok(response),
             Err(error) => {
                 let code = match error.code {
@@ -148,35 +146,20 @@ impl<D: Database, O: ObjectStore> App<D, O> {
     }
     async fn oauth_authorize_validated(
         &self,
-        request: &Request,
-        params: BTreeMap<String, String>,
+        client_id: &str,
+        redirect: &str,
+        state: Option<String>,
+        params: &BTreeMap<String, String>,
     ) -> Result<Response> {
-        if request.method != "GET" {
-            return Err(oauth_error("invalid_request"));
-        }
-        let client_id = parameter(&params, "client_id")?;
-        let client = self.oauth_client(&client_id)?;
-        let redirect = parameter(&params, "redirect_uri")?;
-        // Never redirect errors to an unvalidated or subsequently changed client URI.
-        if !client.accepts_redirect(&redirect) {
-            return Err(oauth_error("invalid_request"));
-        }
-        if parameter(&params, "response_type")? != "code" {
+        if parameter(params, "response_type")? != "code" {
             return Err(oauth_error("unsupported_response_type"));
         }
-        let (resource, scope) = self.authorization_scope_resource(&params)?;
-        if parameter(&params, "code_challenge_method")? != "S256" {
+        let (resource, scope) = self.authorization_scope_resource(params)?;
+        if parameter(params, "code_challenge_method")? != "S256" {
             return Err(oauth_error("invalid_request"));
         }
-        let challenge = parameter(&params, "code_challenge")?;
+        let challenge = parameter(params, "code_challenge")?;
         pkce_challenge(&challenge)?;
-        let state = params.get("state").cloned();
-        if state
-            .as_ref()
-            .is_some_and(|s| s.len() > 1024 || s.chars().any(char::is_control))
-        {
-            return Err(oauth_error("invalid_request"));
-        }
         let now = self.clock.now_ms();
         let id = random_id("oauth")?;
         let browser = secret()?;
@@ -214,7 +197,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         params: BTreeMap<String, String>,
     ) -> Result<Value> {
         let client_id = parameter(&params, "client_id")?;
-        self.oauth_client(&client_id)?;
+        self.client_allowed(&client_id).await?;
         let (resource, scope) = self.authorization_scope_resource(&params)?;
         let now = self.clock.now_ms();
         let id = random_id("oauth")?;
@@ -231,27 +214,41 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             json!({"device_code":device,"user_code":format!("{}-{}-{}-{}",&human[..4],&human[4..8],&human[8..12],&human[12..]),"verification_uri":format!("{}/account",self.config.public_origin),"expires_in":600,"interval":5}),
         )
     }
-    fn current_authorization_client(&self, row: &Row) -> Result<String> {
-        let client = self.oauth_client(&text(row, "client_id")?)?;
-        if text(row, "resource")? != self.oauth_resource() || text(row, "scope")? != "waypost" {
+    async fn current_authorization_client(
+        &self,
+        row: &Row,
+    ) -> Result<super::oauth::ResolvedClient> {
+        let client = self.resolve_client(&text(row, "client_id")?).await?;
+        let scope = text(row, "scope")?;
+        if text(row, "resource")? != self.oauth_resource()
+            || self.normalize_scope(Some(&scope))? != scope
+        {
             return Err(oauth_error("invalid_target"));
         }
         if text(row, "kind")? == "code" && !client.accepts_redirect(&text(row, "redirect_uri")?) {
             return Err(oauth_error("invalid_request"));
         }
-        Ok(client.name.clone())
+        Ok(client)
     }
     pub(super) async fn oauth_consent(&self, request: &Request, body: Value) -> Result<Response> {
         let writing = request.method == "POST";
         if !writing && request.method != "GET" {
             return Err(oauth_error("invalid_request"));
         }
+        let keys = self.keys.is_some();
         fields(
             &body,
-            if writing {
-                &["request_id", "decision", "actor_id", "consumer_id"]
-            } else {
-                &["request_id"]
+            match (writing, keys) {
+                (false, _) => &["request_id"],
+                (true, false) => &["request_id", "decision", "actor_id", "consumer_id"],
+                (true, true) => &[
+                    "request_id",
+                    "decision",
+                    "can_create",
+                    "all_read",
+                    "all_write",
+                    "entries",
+                ],
             },
         )
         .map_err(|_| oauth_error("invalid_request"))?;
@@ -261,12 +258,24 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         let now = self.clock.now_ms();
         let rows=self.db.query(Statement::new("SELECT * FROM oauth_requests WHERE request_id=? AND kind='code' AND browser_digest=? AND status='pending' AND expires_at>?",vec![id.clone().into(),digest(&browser),now.into()])).await?;
         let row = rows.first().ok_or_else(|| oauth_error("invalid_request"))?;
-        let client_name = self.current_authorization_client(row)?;
+        let client = self.current_authorization_client(row).await?;
         if !writing {
-            return Ok(Response::json(
-                200,
-                json!({"request_id":id,"client_id":text(row,"client_id")?,"client_name":client_name,"resource":text(row,"resource")?,"scope":text(row,"scope")?,"selected_space_id":optional_text(&session,"selected_space_id"),"warning":"This connection may send messages and read/write shared materials in the selected Space. It cannot manage the account."}),
-            ));
+            let mut view = client.consent_view(optional_text(row, "redirect_uri").as_deref());
+            view["request_id"] = json!(id);
+            view["resource"] = json!(text(row, "resource")?);
+            view["scope"] = json!(text(row, "scope")?);
+            if keys {
+                view["vault"] = self.keys_consent_view(&session).await?;
+                view["warning"] = json!(
+                    "Choose exactly which entries this connection may read or change. Reading returns secret values to the connected agent."
+                );
+            } else {
+                view["selected_space_id"] = json!(optional_text(&session, "selected_space_id"));
+                view["warning"] = json!(
+                    "This connection may send messages and read/write shared materials in the selected Space. It cannot manage the account."
+                );
+            }
+            return Ok(Response::json(200, view));
         }
         let decision = required(&body, "decision").map_err(|_| oauth_error("invalid_request"))?;
         if !["approve", "deny"].contains(&decision.as_str()) {
@@ -315,7 +324,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         let now = self.clock.now_ms();
         let rows=self.db.query(Statement::new("SELECT * FROM oauth_requests WHERE user_digest=? AND kind='device' AND status='pending' AND expires_at>?",vec![user,now.into()])).await?;
         let row = rows.first().ok_or_else(|| oauth_error("invalid_request"))?;
-        let name = self.current_authorization_client(row)?;
+        let name = self.current_authorization_client(row).await?.name;
         let id = text(row, "request_id")?;
         if action == "inspect" {
             return Ok(Response::json(
@@ -362,6 +371,13 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             None => ("kind='device'", vec![]),
         };
         let active = "EXISTS(SELECT 1 FROM account_sessions s JOIN accounts a ON a.account_id=s.account_id WHERE s.session_digest=? AND s.account_id=? AND s.expires_at>? AND s.created_at>=? AND a.disabled=0)";
+        if let (Some(code), Some(browser)) = (code, &browser_args.first())
+            && self.keys.is_some()
+        {
+            return self
+                .keys_commit_consent(id, &account, &cookie, code, (*browser).clone(), body, now)
+                .await;
+        }
         if let Some(code) = code {
             let sid = optional_text(session, "selected_space_id")
                 .ok_or_else(|| oauth_error("access_denied"))?;
@@ -445,6 +461,7 @@ mod tests {
                 redirect_uris: vec!["https://client.example/callback".into()],
                 allow_loopback_port_variation: false,
             }],
+            ..Default::default()
         });
         let mut params: BTreeMap<String, String> = [
             ("client_id", "client"),

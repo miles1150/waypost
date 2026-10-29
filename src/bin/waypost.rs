@@ -10,7 +10,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() || args.iter().any(|s| s == "--help" || s == "-h") {
         println!(
-            "Waypost\n\n  waypost init [--data ./var]\n  waypost encrypt [--data ./var]\n  waypost serve [--data ./var] [--listen 127.0.0.1:8787]\n\nWAYPOST_ADMIN_SECRET overrides the private admin-secret file.\nWAYPOST_ENCRYPTION_KEYS sets the private JSON encryption keyring.\nWAYPOST_CURSOR_SECRET optionally separates cursor signing from admin rotation.\nWAYPOST_CSRF_SECRET optionally separates browser CSRF signing from admin rotation.\nWAYPOST_OPERATOR_MODE=disabled retires global operator access; requires OIDC and independent cursor/CSRF secrets.\nWAYPOST_PUBLIC_ORIGIN sets the browser Origin / generated HTTP URLs."
+            "Waypost\n\n  waypost init [--data ./var]\n  waypost encrypt [--data ./var]\n  waypost serve [--data ./var] [--listen 127.0.0.1:8787]\n\nWAYPOST_ADMIN_SECRET overrides the private admin-secret file.\nWAYPOST_ENCRYPTION_KEYS sets the private JSON encryption keyring.\nWAYPOST_CURSOR_SECRET optionally separates cursor signing from admin rotation.\nWAYPOST_CSRF_SECRET optionally separates browser CSRF signing from admin rotation.\nWAYPOST_OPERATOR_MODE=disabled retires global operator access; requires OIDC and independent cursor/CSRF secrets.\nWAYPOST_PUBLIC_ORIGIN sets the browser Origin / generated HTTP URLs.\nWAYPOST_PRODUCT=keys serves the keys product (keyenv-remote) instead; requires OIDC and KEYS_DATA_KEYS."
         );
         return Ok(());
     }
@@ -184,6 +184,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         app.with_oauth(config)?
     } else {
         app
+    };
+    let app = match std::env::var("WAYPOST_PRODUCT").as_deref() {
+        Err(_) | Ok("waypost") => app,
+        Ok("keys") => {
+            let keyring = zeroize::Zeroizing::new(
+                std::env::var("KEYS_DATA_KEYS")
+                    .map_err(|_| "The keys product requires KEYS_DATA_KEYS.")?,
+            );
+            app.with_keys(&keyring)?
+        }
+        Ok(_) => return Err("WAYPOST_PRODUCT must be waypost or keys.".into()),
     };
     let app = app.with_onboarding_mode(
         &std::env::var("WAYPOST_ONBOARDING_MODE").unwrap_or_else(|_| "legacy".into()),
