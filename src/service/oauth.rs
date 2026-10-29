@@ -183,9 +183,40 @@ impl<D: Database, O: ObjectStore> App<D, O> {
     pub(super) fn oauth_resource(&self) -> String {
         format!("{}/mcp", self.config.public_origin)
     }
+    pub(super) fn oauth_scope(&self) -> &'static str {
+        if self.keys.is_some() {
+            "keys:read keys:write"
+        } else {
+            "waypost"
+        }
+    }
+    pub(super) fn normalize_scope(&self, raw: Option<&str>) -> Result<String> {
+        if self.keys.is_none() {
+            return match raw {
+                None | Some("waypost") => Ok("waypost".into()),
+                _ => Err(oauth_error("invalid_scope")),
+            };
+        }
+        let raw = raw.unwrap_or("keys:read keys:write");
+        let parts: Vec<_> = raw.split_whitespace().collect();
+        if parts.is_empty()
+            || parts
+                .iter()
+                .any(|p| !["keys:read", "keys:write"].contains(p))
+            || parts.len() > 2
+            || (parts.len() == 2 && parts[0] == parts[1])
+        {
+            return Err(oauth_error("invalid_scope"));
+        }
+        Ok(["keys:read", "keys:write"]
+            .into_iter()
+            .filter(|p| parts.contains(p))
+            .collect::<Vec<_>>()
+            .join(" "))
+    }
     pub(super) fn oauth_challenge(&self, response: &mut Response) {
         if self.oauth_enabled() && response.status == 401 {
-            response.headers.insert("www-authenticate".into(),format!("Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource/mcp\", scope=\"waypost\"",self.config.public_origin));
+            response.headers.insert("www-authenticate".into(),format!("Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource/mcp\", scope=\"{}\"",self.config.public_origin,self.oauth_scope()));
         }
     }
     pub(super) async fn oauth_handle(&self, r: &Request) -> Response {
@@ -247,12 +278,19 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         {
             return Ok(Response::json(
                 200,
-                json!({"resource":self.oauth_resource(),"authorization_servers":[self.config.public_origin],"scopes_supported":["waypost"],"bearer_methods_supported":["header"],"resource_name":"Waypost Space"}),
+                json!({"resource":self.oauth_resource(),"authorization_servers":[self.config.public_origin],"scopes_supported":self.oauth_scope().split_whitespace().collect::<Vec<_>>(),"bearer_methods_supported":["header"],"resource_name":if self.keys.is_some() {"Keyenv"} else {"Waypost Space"}}),
             ));
         }
         if r.method == "GET" && r.path == "/.well-known/oauth-authorization-server" {
             let origin = &self.config.public_origin;
-            let mut metadata = json!({"issuer":origin,"authorization_endpoint":format!("{origin}/oauth/authorize"),"token_endpoint":format!("{origin}/oauth/token"),"revocation_endpoint":format!("{origin}/oauth/revoke"),"device_authorization_endpoint":format!("{origin}/oauth/device_authorization"),"response_types_supported":["code"],"grant_types_supported":["authorization_code","refresh_token","urn:ietf:params:oauth:grant-type:device_code"],"token_endpoint_auth_methods_supported":["none"],"revocation_endpoint_auth_methods_supported":["none"],"code_challenge_methods_supported":["S256"],"scopes_supported":["waypost"],"authorization_response_iss_parameter_supported":true,"client_id_metadata_document_supported":self.oauth_discovery.is_some() && self.oauth_metadata_fetcher.is_some()});
+            let mut metadata = json!({"issuer":origin,"authorization_endpoint":format!("{origin}/oauth/authorize"),"token_endpoint":format!("{origin}/oauth/token"),"revocation_endpoint":format!("{origin}/oauth/revoke"),"device_authorization_endpoint":format!("{origin}/oauth/device_authorization"),"response_types_supported":["code"],"grant_types_supported":["authorization_code","refresh_token","urn:ietf:params:oauth:grant-type:device_code"],"token_endpoint_auth_methods_supported":["none"],"revocation_endpoint_auth_methods_supported":["none"],"code_challenge_methods_supported":["S256"],"scopes_supported":self.oauth_scope().split_whitespace().collect::<Vec<_>>(),"authorization_response_iss_parameter_supported":true,"client_id_metadata_document_supported":self.oauth_discovery.is_some() && self.oauth_metadata_fetcher.is_some()});
+            if self.keys.is_some() {
+                metadata
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("device_authorization_endpoint");
+                metadata["grant_types_supported"] = json!(["authorization_code", "refresh_token"]);
+            }
             if self
                 .oauth_discovery
                 .as_ref()
@@ -277,7 +315,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             };
             return self.oauth_consent(r, body).await;
         }
-        if r.path == "/oauth/device_consent" && r.method == "POST" {
+        if self.keys.is_none() && r.path == "/oauth/device_consent" && r.method == "POST" {
             return self
                 .oauth_device_consent(r, crate::json::parse(&r.body, self.limits.max_json_bytes)?)
                 .await;
@@ -302,7 +340,9 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         let result = match r.path.as_str() {
             "/oauth/token" => self.oauth_token(params).await?,
             "/oauth/revoke" => self.oauth_revoke(params).await?,
-            "/oauth/device_authorization" => self.oauth_device_authorization(params).await?,
+            "/oauth/device_authorization" if self.keys.is_none() => {
+                self.oauth_device_authorization(params).await?
+            }
             _ => return Err(Error::not_found()),
         };
         Ok(Response::json(200, result))

@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>keyenv-remote</title>
+<link rel="stylesheet" href="/account/app.css">
+</head>
+<body>
+<main>
+  <h1>keyenv-remote</h1>
+  <p id="status" role="status"></p>
+
+  <section id="signin" hidden>
+    <p>Sign in with the Google account that owns this secret store.</p>
+    <button id="login" type="button">Sign in with Google</button>
+  </section>
+
+  <section id="consent" hidden>
+    <h2>Connect <span id="client-name"></span></h2>
+    <dl>
+      <dt>Client</dt><dd id="client-detail"></dd>
+      <dt>Returns to</dt><dd id="redirect-host"></dd>
+      <dt>Requested access</dt><dd id="scope"></dd>
+    </dl>
+    <ul id="warnings" class="warnings"></ul>
+    <fieldset>
+      <legend>All entries, including ones created later</legend>
+      <label><input type="checkbox" id="all-read"> Read values</label>
+      <label><input type="checkbox" id="all-write"> Change values</label>
+      <label><input type="checkbox" id="can-create"> Create new entries</label>
+    </fieldset>
+    <table>
+      <thead><tr><th>Entry</th><th>Fields</th><th>Read</th><th>Change</th></tr></thead>
+      <tbody id="entries"></tbody>
+    </table>
+    <p class="note">Reading returns secret values to the connected agent. Changing lets it replace or remove fields. All-entry permissions include entries you leave unchecked and entries created later.</p>
+    <button id="approve" type="button">Allow</button>
+    <button id="deny" type="button">Deny</button>
+  </section>
+
+  <section id="grants" hidden>
+    <h2>Connections</h2>
+    <ul id="grant-list"></ul>
+    <button id="logout" type="button">Sign out</button>
+  </section>
+</main>
+<script src="/account/app.js"></script>
+</body>
+</html>

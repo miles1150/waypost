@@ -58,6 +58,8 @@ Google 登录配置与公钥刷新见[Google OIDC 准备](docs/design/0015-googl
 
 [账号自主管理与运营者退役方案](docs/design/0016-operator-retirement.md)提供默认兼容的禁用路径；生产切换、旧空间认领和既有凭据撤销需分别验收，不能仅凭代码合并视为完成。
 
+MCP OAuth 支持动态注册；原生环境在可安全固定 DNS 时可使用 Client ID Metadata Document，Worker 不启用外部 CIMD。同一网关还服务独立部署的个人密钥库（keyenv-remote）。见[网关抽取、CIMD/DCR 与密钥产品](docs/design/0017-gateway-cimd-dcr-keys.md)。
+
 ## 开源与产品关系
 
 Waypost 使用 [Apache 2.0](LICENSE) 许可证，自行运行免软件许可费，服务器和存储资源由你承担。也可以申请我们维护的托管服务，目前通过邀请试用，后续服务与收费方案尚未确定。

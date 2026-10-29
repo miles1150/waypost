@@ -119,7 +119,7 @@ impl Database for D1Store {
     }
 }
 struct R2Store {
-    bucket: Bucket,
+    bucket: Option<Bucket>,
 }
 fn object_info(object: &worker::Object) -> Result<ObjectInfo> {
     Ok(ObjectInfo {
@@ -132,6 +132,9 @@ fn object_info(object: &worker::Object) -> Result<ObjectInfo> {
     })
 }
 impl R2Store {
+    fn bucket(&self) -> Result<&Bucket> {
+        self.bucket.as_ref().ok_or_else(Error::storage)
+    }
     async fn put(
         &self,
         key: &str,
@@ -141,7 +144,7 @@ impl R2Store {
         size: u64,
     ) -> Result<ObjectInfo> {
         let object = self
-            .bucket
+            .bucket()?
             .put(key, data)
             .http_metadata(HttpMetadata {
                 content_type: Some(content_type.into()),
@@ -193,7 +196,7 @@ impl ObjectStore for R2Store {
         .await
     }
     async fn inspect(&self, key: &str) -> Result<Option<ObjectInfo>> {
-        self.bucket
+        self.bucket()?
             .head(key)
             .await
             .map_err(|_| Error::storage())?
@@ -203,7 +206,7 @@ impl ObjectStore for R2Store {
     }
     async fn read(&self, key: &str) -> Result<Vec<u8>> {
         let object = self
-            .bucket
+            .bucket()?
             .get(key)
             .execute()
             .await
@@ -217,7 +220,10 @@ impl ObjectStore for R2Store {
             .map_err(|_| Error::storage())
     }
     async fn remove(&self, key: &str) -> Result<()> {
-        self.bucket.delete(key).await.map_err(|_| Error::storage())
+        self.bucket()?
+            .delete(key)
+            .await
+            .map_err(|_| Error::storage())
     }
 }
 impl App<D1Store, R2Store> {
@@ -291,7 +297,7 @@ impl App<D1Store, R2Store> {
         let row = self.readable_blob(&p, id).await?;
         let object = self
             .objects
-            .bucket
+            .bucket()?
             .get(text(&row, "object_key")?)
             .execute()
             .await
@@ -456,6 +462,14 @@ pub async fn fetch(
 
 async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<worker::Response> {
     let route_name = crate::http::route_label(raw.method().as_ref(), &raw.path());
+    let product = env
+        .var("WAYPOST_PRODUCT")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|_| "waypost".into());
+    if !["waypost", "keys"].contains(&product.as_str()) {
+        return log_and_error(&route_name, Error::internal("product configuration"));
+    }
+    let keys_product = product == "keys";
     let production = env
         .var("DEPLOYMENT_ENV")
         .is_ok_and(|value| value.to_string() == "production");
@@ -559,7 +573,11 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
     let app = App::new(
         D1Store { session },
         R2Store {
-            bucket: env.bucket("OBJECTS")?,
+            bucket: if keys_product {
+                None
+            } else {
+                Some(env.bucket("OBJECTS")?)
+            },
         },
         config,
     )
@@ -642,7 +660,27 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
         Ok(app) => app,
         Err(_) => return log_and_error(&route_name, Error::internal("operator configuration")),
     };
-    let app = if let Ok(keys) = env.secret("WAYPOST_ENCRYPTION_KEYS") {
+    let app = if keys_product {
+        let owner = match env.var("KEYS_OWNER_SUBJECT") {
+            Ok(v) => v.to_string(),
+            Err(_) => return log_and_error(&route_name, Error::internal("owner subject missing")),
+        };
+        let keys = match env.secret("KEYS_DATA_KEYS") {
+            Ok(v) => v.to_string(),
+            Err(_) => {
+                return log_and_error(&route_name, Error::internal("keys data keyring missing"));
+            }
+        };
+        match app
+            .with_account_owner_subject(&owner)
+            .and_then(|a| a.with_keys(&keys))
+        {
+            Ok(a) => a,
+            Err(_) => {
+                return log_and_error(&route_name, Error::internal("keys product configuration"));
+            }
+        }
+    } else if let Ok(keys) = env.secret("WAYPOST_ENCRYPTION_KEYS") {
         let legacy = env
             .var("ALLOW_LEGACY_PLAINTEXT")
             .is_ok_and(|v| v.to_string() == "1");
@@ -673,7 +711,7 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
         headers: raw.headers().entries().collect(),
         body: vec![],
     };
-    if request.path == "/ready" && request.method == "GET" {
+    if !keys_product && request.path == "/ready" && request.method == "GET" {
         let readiness: Result<Value> = async {
             if app.operator_enabled { app.admin_auth(&request)?; }
             else { app.admin_access(&request).await?; }
@@ -692,6 +730,7 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
         };
     }
     if let crate::http::Route::UploadContent(id) = route
+        && !keys_product
         && app.encryption.is_none()
     {
         return match app.streaming_upload(&request, &mut raw, id).await {
@@ -700,6 +739,7 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
         };
     }
     if let crate::http::Route::BlobContent(id) = route
+        && !keys_product
         && app.encryption.is_none()
     {
         return match app.streaming_download(&request, id).await {

@@ -23,6 +23,7 @@ mod dashboard;
 mod dashboard_memory;
 mod encryption;
 mod invitations;
+mod keys;
 mod mailbox;
 mod maintenance;
 mod mcp;
@@ -101,6 +102,9 @@ pub struct App<D, O> {
     pub(crate) encryption: Option<encryption::Encryption>,
     pub(crate) oidc: Option<accounts_oidc::OidcConfig>,
     pub(crate) account_signup_limit: usize,
+    /// Optional exact OIDC subject restriction for single-owner products.
+    pub(crate) account_owner_subject: Option<String>,
+    pub(crate) keys: Option<keys::KeysConfig>,
     pub(crate) oauth_discovery: Option<oauth_client_registry::OAuthClientDiscoveryConfig>,
     pub(crate) oauth_metadata_fetcher:
         Option<Rc<dyn oauth_client_registry::OAuthClientMetadataFetcher>>,
@@ -120,6 +124,8 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             encryption: None,
             oidc: None,
             account_signup_limit: 0,
+            account_owner_subject: None,
+            keys: None,
             oauth_discovery: None,
             oauth_metadata_fetcher: None,
             invitations_enabled: true,
@@ -221,6 +227,9 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         self
     }
     pub async fn handle(&self, request: Request) -> Response {
+        if self.keys.is_some() {
+            return self.keys_handle(request).await;
+        }
         if request.path == "/onboarding" && request.method == "GET" {
             return Response::json(
                 200,
@@ -265,7 +274,13 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             return self.admin_session(&request).await;
         }
         if request.path == "/mcp" {
-            let mut response = self.mcp(&request).await;
+            let mut response = crate::gateway::mcp::serve(
+                &mcp::WaypostTools(self),
+                &self.config.public_origin,
+                self.limits.max_json_bytes,
+                &request,
+            )
+            .await;
             self.oauth_challenge(&mut response);
             return response;
         }
