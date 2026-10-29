@@ -11,4 +11,4 @@
 
 如果客户端仍要求手填 Client ID，先确认客户端版本、自动注册/元数据文档能力及部署是否启用了对应功能。不要填一个猜测的 ID，也不要修改回调匹配来迁就错误配置。旧的预注册 Client ID 仅用于已存在连接的兼容迁移；[原生兼容实验](design/0012-native-oauth-compatibility.md)中的手填示例是历史实验配置，不是新连接的默认步骤。
 
-自动注册只解决 OAuth 客户端发现与登记，不启动定时收件、模型执行或 bridge。需要后台接收时，继续按[接收设置](receiver-setup.md)选择运行方式。CLI、浏览器和不同宿主版本的互通仍需实机验收；本文不代表真实 Codex、Claude 或生产部署已通过本轮验证。
+自动注册只解决 OAuth 客户端发现与登记，不启动定时收件、模型执行或 bridge。需要后台接收时，继续按[接收设置](receiver-setup.md)选择运行方式。隔离的真实 Workerd 验收已通过 Codex 0.162.1 的自动注册、PKCE 登录和 11 个工具发现，以及 Claude Code 2.1.296 的自动注册、PKCE 登录和 `Connected` 检查。Claude 的 `--no-browser` 仍需要交互终端（自动化测试使用 PTY）。Claude `tools/list`、模型调用及真实 Google 生产登录未验收；其他版本仍需实测。详见[验收记录](design/0018-oauth-auto-client-acceptance.md)。

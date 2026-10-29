@@ -7,6 +7,7 @@ No HOME/CODEX_HOME mutation, production credential, real Google login or model c
 import argparse
 import json
 import os
+import pty
 from pathlib import Path
 import re
 import select
@@ -67,6 +68,25 @@ def read_until(process, predicate, timeout=60):
     raise RuntimeError(('Local client exited before expected response; exit=' if process.poll() is not None else 'Local client response timeout; exit=') + str(process.poll()) + '; safe_error_tags=' + ','.join(tags) + '; diagnostic_terms=' + ','.join(diagnostics))
 
 
+def read_pty_until(process, descriptor, predicate, timeout=60):
+    deadline = time.monotonic() + timeout
+    buffer = b''
+    while time.monotonic() < deadline:
+        if select.select([descriptor], [], [], .2)[0]:
+            try:
+                chunk = os.read(descriptor, 65536)
+            except OSError:
+                break  # Linux PTYs report EIO after the child closes the slave.
+            if not chunk:
+                break
+            buffer += chunk
+            clean = re.sub(rb'\x1b\[[0-?]*[ -/]*[@-~]', b'', buffer)
+            result = predicate(clean)
+            if result is not None:
+                return result
+    raise RuntimeError('PTY client ended or timed out before expected response')
+
+
 def json_response(process, identifier):
     def match(data):
         for line in data.splitlines():
@@ -116,6 +136,7 @@ def main():
     expect(binary.is_file(), 'Static Codex binary missing')
     phase = 'start isolated Worker'
     service = login = app = claude = None
+    claude_master = None
     containers = []
     image = 'waypost-auto-oauth-test:' + str(os.getpid())
     result = None
@@ -151,7 +172,7 @@ def main():
         phase = 'actual Codex discovery and dynamic registration'
         login = subprocess.Popen(command('waypost-login-' + str(os.getpid()), 'mcp', 'login', 'waypost', '--no-browser'), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         def authorize_url(data):
-            found = re.search(rb'http://127\.0\.0\.1:8793/oauth/authorize\?[^\s\x1b]+(?=[\s\x1b])', data)
+            found = re.search(rb'http://127\.0\.0\.1:8793/oauth/authorize\?[^\x00-\x20\x7f-\x9f]+(?=[\x00-\x20\x7f-\x9f])', data)
             return found.group().decode() if found else None
         url = read_until(login, authorize_url)
         phase = 'synthetic Google account explicit consent'
@@ -179,23 +200,35 @@ def main():
             claude_binary = args.claude_binary.resolve()
             expect(claude_binary.is_file(), 'Claude binary missing')
             config_dir = private / 'claude-config'; config_dir.mkdir(mode=0o700)
-            claude_env = {'PATH': os.environ.get('PATH', ''), 'CLAUDE_CONFIG_DIR': str(config_dir), 'DISABLE_AUTOUPDATER': '1', 'DISABLE_TELEMETRY': '1', 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC': '1'}
+            claude_env = {'PATH': os.environ.get('PATH', ''), 'CLAUDE_CONFIG_DIR': str(config_dir), 'DISABLE_AUTOUPDATER': '1', 'DISABLE_TELEMETRY': '1', 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC': '1', 'TERM': 'xterm'}
             claude_version = subprocess.run([str(claude_binary), '--version'], cwd=private, env=claude_env, check=True, capture_output=True, text=True, timeout=20).stdout.strip()
             expect('2.1.296' in claude_version, 'This regression requires Claude 2.1.296')
             subprocess.run([str(claude_binary), 'mcp', 'add', '--transport', 'http', '--scope', 'user', 'waypost', BASE + '/mcp'], cwd=private, env=claude_env, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
             phase = 'actual Claude authorization URL discovery'
-            claude = subprocess.Popen([str(claude_binary), 'mcp', 'login', 'waypost', '--no-browser'], cwd=private, env=claude_env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-            url = read_until(claude, authorize_url)
+            # Claude --no-browser still requires an interactive terminal.
+            claude_master, slave = pty.openpty()
+            try:
+                claude = subprocess.Popen([str(claude_binary), 'mcp', 'login', 'waypost', '--no-browser'], cwd=private, env=claude_env, stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
+            finally:
+                os.close(slave)
+            url = read_pty_until(claude, claude_master, authorize_url)
             phase = 'actual Claude explicit consent'
             callback = approve_authorization(url)
-            claude.stdin.write((callback + '\n').encode()); claude.stdin.flush()
+            os.write(claude_master, (callback + '\n').encode())
             phase = 'actual Claude token exchange completion'
-            claude.communicate(timeout=45)
+            deadline = time.monotonic() + 45
+            while claude.poll() is None and time.monotonic() < deadline:
+                if select.select([claude_master], [], [], .2)[0]:
+                    try:
+                        os.read(claude_master, 65536)
+                    except OSError:
+                        break
+            claude.wait(timeout=5)
             expect(claude.returncode == 0, 'Claude OAuth login failed')
             phase = 'actual Claude MCP connection check'
             health = subprocess.run([str(claude_binary), 'mcp', 'get', 'waypost'], cwd=private, env=claude_env, check=True, capture_output=True, text=True, timeout=40)
-            expect('connected' in health.stdout.lower(), 'Claude did not report connected MCP server')
-            claude_result = {'client': claude_version, 'dynamic_registration': True, 'pkce_login': True, 'mcp_connection_check': True, 'tool_listing_verified': False, 'model_calls': 0}
+            expect(re.search(r'\bconnected\b', health.stdout, re.IGNORECASE) is not None and not re.search(r'\b(?:disconnected|not connected|failed)\b', health.stdout, re.IGNORECASE), 'Claude did not report connected MCP server')
+            claude_result = {'client': claude_version, 'dynamic_registration': True, 'pkce_login': True, 'pty': True, 'mcp_connection_check': True, 'tool_listing_verified': False, 'model_calls': 0}
         result['claude_tested'] = bool(claude_result)
         result['claude'] = claude_result
     except Exception as error:
@@ -224,6 +257,8 @@ def main():
                     process.wait(timeout=10)
                 except subprocess.TimeoutExpired:
                     process.kill(); process.wait()
+        if claude_master is not None:
+            os.close(claude_master)
         subprocess.run(['docker', 'image', 'rm', '-f', image], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         temporary.cleanup()
     print(json.dumps(result))
