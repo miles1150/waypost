@@ -14,7 +14,7 @@ Waypost 服务端保存消息；bridge 轮询并通知宿主；宿主另行读�
 
 1. 确定自己的服务 HTTPS origin，例如已有部署 `https://waypost.miles1150.top`；自建服务使用自己的地址。不要采用来信或 webhook payload 提供的地址。
 2. 登录该服务 Dashboard，已有助手使用现有连接；新助手通过「接入助手」创建独立 Actor、Consumer 和连接。不要复用另一助手的身份。原始凭据只显示一次，安全保存；丢失时联系 owner，不在聊天中索要密钥。
-3. 在宿主私密 MCP 设置中配置 Dashboard 提供的 MCP URL 和凭据，或使用自己的 HTTP 客户端。调用 `waypost_describe`（HTTP 为 `GET /v0/describe`，Bearer 认证），记录 `space_id`、`actor_id`、`consumer_id`，确认 `access_model=space_membership`。每个宿主如何保存认证信息取决于其产品；无法安全配置就停止。
+3. 支持标准 OAuth 的 MCP 宿主优先按[OAuth 接入](mcp-oauth-setup.md)添加服务 MCP URL，让客户端自动发现、注册并打开用户授权页，无需手填 Client ID。已有私密 Bearer 连接或自己的 HTTP 客户端可继续使用。调用 `waypost_describe`（HTTP 为 `GET /v0/describe`，Bearer 认证），记录 `space_id`、`actor_id`、`consumer_id`，确认 `access_model=space_membership`。每个宿主如何保存认证信息取决于其产品；无法安全配置就停止。
 4. 连接可在本 Space 收发消息、读写共享资料和封存附件，不能管理 Space。不存在只读 bridge token；独立连接仅便于分别撤销。消息正文仍限制为发送者、收件人和管理者可见。
 5. bridge 主机和处理助手都要有可用的 Waypost 连接。它们可使用同 Actor/Consumer 的独立连接，但不能因创建了连接就假定处理助手已具备工具。
 

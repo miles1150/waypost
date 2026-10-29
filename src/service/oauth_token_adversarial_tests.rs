@@ -62,7 +62,7 @@ fn wrapped(
     clock: Rc<TestClock>,
     fault: Fault,
 ) -> App<FaultDb, FileStore> {
-    let oauth = app.oauth.clone();
+    let oauth_discovery = app.oauth_discovery.clone();
     let mut wrapped = App::new(
         FaultDb {
             inner: app.db,
@@ -73,7 +73,7 @@ fn wrapped(
         app.config,
     )
     .with_clock(clock);
-    wrapped.oauth = oauth;
+    wrapped.oauth_discovery = oauth_discovery;
     wrapped
 }
 async fn count<D: Database>(app: &App<D, FileStore>, sql: &str) -> i64 {
@@ -203,7 +203,7 @@ async fn concurrent_code_and_refresh_on_independent_connections_revoke_replay() 
             app.config.clone(),
         )
         .with_clock(clock.clone());
-        second.oauth = app.oauth.clone();
+        second.oauth_discovery = app.oauth_discovery.clone();
         let first = wrapped(app, clock.clone(), Fault::None);
         let second = wrapped(second, clock, Fault::None);
         let request = if refresh {

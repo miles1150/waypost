@@ -1028,7 +1028,7 @@ mod tests {
                 200
             );
             app.db.batch(vec![
-                Statement::new("INSERT INTO oauth_families SELECT 'family','client','http://127.0.0.1:8787/mcp','space','account_test',space_id,default_actor_id,default_consumer_id,0,9223372036854775807,NULL FROM spaces WHERE space_id=?",vec![sid.clone().into()]),
+                Statement::new("INSERT INTO oauth_families(family_id,client_id,resource,scope,account_id,space_id,actor_id,consumer_id,created_at,expires_at,revoked_at) SELECT 'family','client','http://127.0.0.1:8787/mcp','space','account_test',space_id,default_actor_id,default_consumer_id,0,9223372036854775807,NULL FROM spaces WHERE space_id=?",vec![sid.clone().into()]),
                 Statement::new("INSERT INTO tokens(token_id,token_digest,space_id,actor_id,consumer_id,created_at,credential_kind) SELECT 'oauth',randomblob(32),space_id,default_actor_id,default_consumer_id,0,'oauth' FROM spaces WHERE space_id=?",vec![sid.clone().into()]),
                 Statement::new("INSERT INTO tokens(token_id,token_digest,space_id,actor_id,consumer_id,created_at,credential_kind) SELECT 'orphan',randomblob(32),space_id,default_actor_id,default_consumer_id,0,'oauth' FROM spaces WHERE space_id=?",vec![sid.clone().into()]),
                 Statement::new("INSERT INTO tokens(token_id,token_digest,space_id,actor_id,consumer_id,created_at) SELECT 'legacy',randomblob(32),space_id,default_actor_id,default_consumer_id,0 FROM spaces WHERE space_id=?",vec![sid.clone().into()]),

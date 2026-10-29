@@ -105,7 +105,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             return Err(oauth_error("invalid_request"));
         }
         let client_id = parameter(&params, "client_id")?;
-        let client = self.oauth_client(&client_id)?;
+        let client = self.oauth_client(&client_id).await?;
         let redirect = parameter(&params, "redirect_uri")?;
         if !client.accepts_redirect(&redirect) {
             return Err(oauth_error("invalid_request"));
@@ -155,7 +155,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             return Err(oauth_error("invalid_request"));
         }
         let client_id = parameter(&params, "client_id")?;
-        let client = self.oauth_client(&client_id)?;
+        let client = self.oauth_client(&client_id).await?;
         let redirect = parameter(&params, "redirect_uri")?;
         // Never redirect errors to an unvalidated or subsequently changed client URI.
         if !client.accepts_redirect(&redirect) {
@@ -182,7 +182,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         let browser = secret()?;
         let rows=self.db.batch(vec![
             Statement::new("DELETE FROM oauth_requests WHERE status='pending' AND expires_at<=?",vec![(now - 86_400_000).into()]),
-            Statement::new("INSERT INTO oauth_requests(request_id,kind,client_id,resource,scope,redirect_uri,client_state,code_challenge,browser_digest,status,created_at,expires_at,next_poll_at) SELECT ?,'code',?,?,?,?,?,?,?,'pending',?,?,? WHERE (SELECT count(*) FROM oauth_requests WHERE status IN('pending','approved') AND expires_at>?)<1000 RETURNING request_id",vec![id.clone().into(),client_id.into(),resource.into(),scope.into(),redirect.into(),state.into(),challenge.into(),digest(&browser),now.into(),(now+600_000).into(),now.into(),now.into()])
+            Statement::new("INSERT INTO oauth_requests(request_id,kind,client_id,resource,scope,redirect_uri,client_state,code_challenge,browser_digest,status,client_revision,created_at,expires_at,next_poll_at) SELECT ?,'code',?,?,?,?,?,?,?,'pending',?,?,?,? WHERE (SELECT count(*) FROM oauth_requests WHERE status IN('pending','approved') AND expires_at>?)<1000 RETURNING request_id",vec![id.clone().into(),client_id.into(),resource.into(),scope.into(),redirect.into(),state.into(),challenge.into(),digest(&browser),client.revision.into(),now.into(),(now+600_000).into(),now.into(),now.into()])
         ]).await?;
         if rows[1].is_empty() {
             return Err(oauth_error("temporarily_unavailable"));
@@ -214,7 +214,10 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         params: BTreeMap<String, String>,
     ) -> Result<Value> {
         let client_id = parameter(&params, "client_id")?;
-        self.oauth_client(&client_id)?;
+        let client = self.oauth_client(&client_id).await?;
+        if client.source != "legacy" {
+            return Err(oauth_error("unauthorized_client"));
+        }
         let (resource, scope) = self.authorization_scope_resource(&params)?;
         let now = self.clock.now_ms();
         let id = random_id("oauth")?;
@@ -222,7 +225,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         let human = hex::encode_upper(random_bytes::<8>()?);
         let rows=self.db.batch(vec![
             Statement::new("DELETE FROM oauth_requests WHERE status='pending' AND expires_at<=?",vec![(now - 86_400_000).into()]),
-            Statement::new("INSERT INTO oauth_requests(request_id,kind,client_id,resource,scope,device_digest,user_digest,status,created_at,expires_at,next_poll_at) SELECT ?,'device',?,?,?,?,?,'pending',?,?,? WHERE (SELECT count(*) FROM oauth_requests WHERE status IN('pending','approved') AND expires_at>?)<1000 RETURNING request_id",vec![id.into(),client_id.into(),resource.into(),scope.into(),digest(&device),digest(&human),now.into(),(now+600_000).into(),now.into(),now.into()])
+            Statement::new("INSERT INTO oauth_requests(request_id,kind,client_id,resource,scope,device_digest,user_digest,status,client_revision,created_at,expires_at,next_poll_at) SELECT ?,'device',?,?,?,?,?,'pending',?,?,?,? WHERE (SELECT count(*) FROM oauth_requests WHERE status IN('pending','approved') AND expires_at>?)<1000 RETURNING request_id",vec![id.into(),client_id.into(),resource.into(),scope.into(),digest(&device),digest(&human),client.revision.into(),now.into(),(now+600_000).into(),now.into(),now.into()])
         ]).await?;
         if rows[1].is_empty() {
             return Err(oauth_error("temporarily_unavailable"));
@@ -231,15 +234,21 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             json!({"device_code":device,"user_code":format!("{}-{}-{}-{}",&human[..4],&human[4..8],&human[8..12],&human[12..]),"verification_uri":format!("{}/account",self.config.public_origin),"expires_in":600,"interval":5}),
         )
     }
-    fn current_authorization_client(&self, row: &Row) -> Result<String> {
-        let client = self.oauth_client(&text(row, "client_id")?)?;
+    async fn current_authorization_client(
+        &self,
+        row: &Row,
+    ) -> Result<super::oauth_client_registry::ResolvedClient> {
+        let client = self.oauth_client(&text(row, "client_id")?).await?;
+        if client.revision != integer(row, "client_revision")? {
+            return Err(oauth_error("invalid_client"));
+        }
         if text(row, "resource")? != self.oauth_resource() || text(row, "scope")? != "waypost" {
             return Err(oauth_error("invalid_target"));
         }
         if text(row, "kind")? == "code" && !client.accepts_redirect(&text(row, "redirect_uri")?) {
             return Err(oauth_error("invalid_request"));
         }
-        Ok(client.name.clone())
+        Ok(client)
     }
     pub(super) async fn oauth_consent(&self, request: &Request, body: Value) -> Result<Response> {
         let writing = request.method == "POST";
@@ -261,11 +270,11 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         let now = self.clock.now_ms();
         let rows=self.db.query(Statement::new("SELECT * FROM oauth_requests WHERE request_id=? AND kind='code' AND browser_digest=? AND status='pending' AND expires_at>?",vec![id.clone().into(),digest(&browser),now.into()])).await?;
         let row = rows.first().ok_or_else(|| oauth_error("invalid_request"))?;
-        let client_name = self.current_authorization_client(row)?;
+        let client_name = self.current_authorization_client(row).await?;
         if !writing {
             return Ok(Response::json(
                 200,
-                json!({"request_id":id,"client_id":text(row,"client_id")?,"client_name":client_name,"resource":text(row,"resource")?,"scope":text(row,"scope")?,"selected_space_id":optional_text(&session,"selected_space_id"),"warning":"This connection may send messages and read/write shared materials in the selected Space. It cannot manage the account."}),
+                json!({"request_id":id,"client_id":text(row,"client_id")?,"client_name":client_name.name,"client_source":client_name.source,"redirect_uri":text(row,"redirect_uri")?,"resource":text(row,"resource")?,"scope":text(row,"scope")?,"selected_space_id":optional_text(&session,"selected_space_id"),"warning":"This connection may send messages and read/write shared materials in the selected Space. It cannot manage the account."}),
             ));
         }
         let decision = required(&body, "decision").map_err(|_| oauth_error("invalid_request"))?;
@@ -315,12 +324,12 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         let now = self.clock.now_ms();
         let rows=self.db.query(Statement::new("SELECT * FROM oauth_requests WHERE user_digest=? AND kind='device' AND status='pending' AND expires_at>?",vec![user,now.into()])).await?;
         let row = rows.first().ok_or_else(|| oauth_error("invalid_request"))?;
-        let name = self.current_authorization_client(row)?;
+        let name = self.current_authorization_client(row).await?;
         let id = text(row, "request_id")?;
         if action == "inspect" {
             return Ok(Response::json(
                 200,
-                json!({"request_id":id,"client_id":text(row,"client_id")?,"client_name":name,"resource":text(row,"resource")?,"scope":text(row,"scope")?,"selected_space_id":optional_text(&session,"selected_space_id"),"warning":"Verify this code came from your own device. Approval grants space-member access."}),
+                json!({"request_id":id,"client_id":text(row,"client_id")?,"client_name":name.name,"client_source":name.source,"redirect_uri":null,"resource":text(row,"resource")?,"scope":text(row,"scope")?,"selected_space_id":optional_text(&session,"selected_space_id"),"warning":"Verify this code came from your own device. Approval grants space-member access."}),
             ));
         }
         // This internal marker selects approve/deny; it is never an authorization code.
@@ -362,6 +371,8 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             None => ("kind='device'", vec![]),
         };
         let active = "EXISTS(SELECT 1 FROM account_sessions s JOIN accounts a ON a.account_id=s.account_id WHERE s.session_digest=? AND s.account_id=? AND s.expires_at>? AND s.created_at>=? AND a.disabled=0)";
+        let (client_guard, client_args) = self.oauth_client_guard("oauth_requests", now);
+
         if let Some(code) = code {
             let sid = optional_text(session, "selected_space_id")
                 .ok_or_else(|| oauth_error("access_denied"))?;
@@ -392,6 +403,9 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                 account.clone().into(),
                 now.into(),
                 (now - 900_000).into(),
+            ]);
+            args.extend(client_args.clone());
+            args.extend([
                 digest(&cookie),
                 sid.clone().into(),
                 account.into(),
@@ -400,7 +414,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                 actor.into(),
                 consumer.into(),
             ]);
-            let rows=self.db.batch(vec![Statement::new(format!("UPDATE oauth_requests SET status='approved',account_id=?,space_id=?,actor_id=?,consumer_id=?,approved_at=?,code_digest=?,expires_at=MIN(expires_at,?) WHERE request_id=? AND status='pending' AND expires_at>? AND {browser_guard} AND {active} AND EXISTS(SELECT 1 FROM account_sessions s JOIN account_spaces m ON m.account_id=s.account_id AND m.space_id=s.selected_space_id WHERE s.session_digest=? AND s.selected_space_id=? AND m.account_id=? AND m.space_id=?) AND EXISTS(SELECT 1 FROM actors a JOIN consumers c ON c.space_id=a.space_id AND c.actor_id=a.actor_id WHERE a.space_id=? AND a.actor_id=? AND c.consumer_id=? AND a.disabled=0 AND c.disabled=0 AND c.view='inbox') RETURNING request_id"),args)]).await?;
+            let rows=self.db.batch(vec![Statement::new(format!("UPDATE oauth_requests SET status='approved',account_id=?,space_id=?,actor_id=?,consumer_id=?,approved_at=?,code_digest=?,expires_at=MIN(expires_at,?) WHERE request_id=? AND status='pending' AND expires_at>? AND {browser_guard} AND {active} AND {client_guard} AND EXISTS(SELECT 1 FROM account_sessions s JOIN account_spaces m ON m.account_id=s.account_id AND m.space_id=s.selected_space_id WHERE s.session_digest=? AND s.selected_space_id=? AND m.account_id=? AND m.space_id=?) AND EXISTS(SELECT 1 FROM actors a JOIN consumers c ON c.space_id=a.space_id AND c.actor_id=a.actor_id WHERE a.space_id=? AND a.actor_id=? AND c.consumer_id=? AND a.disabled=0 AND c.disabled=0 AND c.view='inbox') RETURNING request_id"),args)]).await?;
             if rows[0].is_empty() {
                 return Err(oauth_error("access_denied"));
             }
@@ -438,14 +452,18 @@ mod tests {
                 public_origin: "https://waypost.example".into(),
             },
         );
-        app.oauth = Some(super::super::oauth::OAuthConfig {
-            clients: vec![super::super::oauth::OAuthClient {
-                client_id: "client".into(),
-                name: "Test client".into(),
-                redirect_uris: vec!["https://client.example/callback".into()],
-                allow_loopback_port_variation: false,
-            }],
-        });
+        app.oidc=Some(serde_json::from_value(json!({"issuer":"https://fixture.example","client_id":"test","authorization_endpoint":"https://fixture.example/authorize","token_endpoint":"https://fixture.example/token","keys":[]})).unwrap());
+        app = app
+            .import_legacy_oauth_clients(super::super::oauth::OAuthConfig {
+                clients: vec![super::super::oauth::OAuthClient {
+                    client_id: "client".into(),
+                    name: "Test client".into(),
+                    redirect_uris: vec!["https://client.example/callback".into()],
+                    allow_loopback_port_variation: false,
+                }],
+            })
+            .await
+            .unwrap();
         let mut params: BTreeMap<String, String> = [
             ("client_id", "client"),
             ("resource", "https://waypost.example/mcp"),

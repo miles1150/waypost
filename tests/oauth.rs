@@ -72,7 +72,7 @@ impl Fixture {
             1,
         )
         .unwrap()
-        .with_oauth(OAuthConfig {
+        .import_legacy_oauth_clients(OAuthConfig {
             clients: vec![OAuthClient {
                 client_id: "client".into(),
                 name: "Integration client".into(),
@@ -84,6 +84,7 @@ impl Fixture {
                 allow_loopback_port_variation: true,
             }],
         })
+        .await
         .unwrap();
         let space = call(
             &app,
@@ -384,7 +385,7 @@ async fn http_consent_requires_browser_csrf_and_selected_space() {
     let missing_csrf=f.client.post(format!("{}/oauth/consent",f.origin)).header("origin",&f.origin).header("cookie",format!("waypost_account={SESSION}; {browser}")).header("content-type","application/json").body(approve.to_string()).send().await.unwrap();assert_eq!(decode(missing_csrf).await,(403,json!({"error":"access_denied"})));
     let foreign=json!({"request_id":id,"decision":"approve","actor_id":f.foreign["default_actor_id"],"consumer_id":f.foreign["default_consumer_id"]});
     assert_eq!(decode(f.browser("/oauth/consent",&browser,foreign).send().await.unwrap()).await,(400,json!({"error":"access_denied"})));
-    let preview=f.client.get(format!("{}/oauth/consent?request_id={id}",f.origin)).header("cookie",format!("waypost_account={SESSION}; {browser}")).send().await.unwrap();let (status,preview)=decode(preview).await;assert_eq!(status,200);assert_eq!(preview["selected_space_id"],f.space["space_id"]);assert!(preview.get("redirect_uri").is_none());
+    let preview=f.client.get(format!("{}/oauth/consent?request_id={id}",f.origin)).header("cookie",format!("waypost_account={SESSION}; {browser}")).send().await.unwrap();let (status,preview)=decode(preview).await;assert_eq!(status,200);assert_eq!(preview["selected_space_id"],f.space["space_id"]);assert_eq!(preview["redirect_uri"], CALLBACK);assert_eq!(preview["client_source"], "legacy");
     let denied=decode(f.browser("/oauth/consent",&browser,json!({"request_id":id,"decision":"deny"})).send().await.unwrap()).await;assert_eq!(denied.0,200);
     let redirect=url::Url::parse(denied.1["redirect_uri"].as_str().unwrap()).unwrap();assert!(redirect.query_pairs().any(|(k,v)|k=="error"&&v=="access_denied"));assert!(!redirect.query_pairs().any(|(k,_)|k=="code"));
     assert_eq!(decode(f.browser("/oauth/consent",&browser,approve).send().await.unwrap()).await,(400,json!({"error":"invalid_request"})));

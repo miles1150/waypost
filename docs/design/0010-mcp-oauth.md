@@ -1,5 +1,7 @@
 # MCP OAuth: preregistered public clients
 
+> 本文保留原阶段设计与实验记录。新连接请按[标准 OAuth 接入](../mcp-oauth-setup.md)使用自动注册或客户端元数据文档；下方预注册 Client ID 配置用于历史兼容，不是当前默认步骤。
+
 Local implementation, disabled by default. No production migration, deployment, provider registration or real host authorization is implied. This extends the [account preview](0009-personal-accounts.md); its custom device helper remains compatible and does not silently switch protocols.
 
 ## Trust boundary

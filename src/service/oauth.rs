@@ -1,4 +1,4 @@
-//! A bounded pre-registered public-client OAuth profile for the Waypost MCP resource.
+//! OAuth protocol routing. Static configuration types are migration input only.
 use super::*;
 use serde::Deserialize;
 use url::Url;
@@ -54,6 +54,7 @@ impl OAuthClient {
 
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Legacy public-client import format; not a runtime authorization configuration.
 pub struct OAuthConfig {
     pub clients: Vec<OAuthClient>,
 }
@@ -109,7 +110,7 @@ pub(super) fn parse_params(raw: &str) -> Result<BTreeMap<String, String>> {
     Ok(out)
 }
 impl<D: Database, O: ObjectStore> App<D, O> {
-    pub fn with_oauth(mut self, config: OAuthConfig) -> Result<Self> {
+    pub async fn import_legacy_oauth_clients(mut self, config: OAuthConfig) -> Result<Self> {
         if self.oidc.is_none() || config.clients.is_empty() || config.clients.len() > 32 {
             return Err(Error::invalid(
                 "OAuth requires accounts and 1–32 pre-registered clients.",
@@ -157,20 +158,33 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                 }
             }
         }
-        self.oauth = Some(config);
+        let now = self.clock.now_ms();
+        let mut statements = Vec::new();
+        for client in config.clients {
+            let metadata=json!({"client_id":client.client_id,"client_name":client.name,"redirect_uris":client.redirect_uris,"token_endpoint_auth_method":"none","grant_types":["authorization_code","refresh_token"],"response_types":["code"],"scope":"waypost"}).to_string();
+            let fingerprint = hex::encode(Sha256::digest(metadata.as_bytes()));
+            statements.push(Statement::new("INSERT INTO oauth_dynamic_clients(client_id,source,metadata_json,security_fingerprint,allow_loopback_port_variation,revision,valid_until,created_at,updated_at) VALUES(?,'legacy',?,?,?,0,9007199254740991,?,?) ON CONFLICT(client_id) DO UPDATE SET revision=CASE WHEN source='legacy' AND revision=0 AND security_fingerprint=excluded.security_fingerprint AND allow_loopback_port_variation=excluded.allow_loopback_port_variation THEN revision ELSE -1 END",vec![client.client_id.into(),metadata.into(),fingerprint.into(),client.allow_loopback_port_variation.into(),now.into(),now.into()]));
+        }
+        self.db.batch(statements).await?;
+        if self.oauth_discovery.is_none() {
+            self.oauth_discovery = Some(super::oauth_client_registry::OAuthClientDiscoveryConfig {
+                dynamic_registration: false,
+                ..Default::default()
+            });
+        }
         Ok(self)
     }
-    pub(super) fn oauth_client(&self, id: &str) -> Result<&OAuthClient> {
-        self.oauth
-            .as_ref()
-            .and_then(|c| c.clients.iter().find(|c| c.client_id == id))
-            .ok_or_else(|| oauth_error("invalid_client"))
+    pub(super) async fn oauth_client(
+        &self,
+        id: &str,
+    ) -> Result<super::oauth_client_registry::ResolvedClient> {
+        self.resolve_dynamic_client(id).await
     }
     pub(super) fn oauth_resource(&self) -> String {
         format!("{}/mcp", self.config.public_origin)
     }
     pub(super) fn oauth_challenge(&self, response: &mut Response) {
-        if self.oauth.is_some() && response.status == 401 {
+        if self.oauth_enabled() && response.status == 401 {
             response.headers.insert("www-authenticate".into(),format!("Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource/mcp\", scope=\"waypost\"",self.config.public_origin));
         }
     }
@@ -190,7 +204,10 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                     | "slow_down"
                     | "expired_token"
                     | "access_denied" => (e.code, 400),
-                    "invalid_client" => ("invalid_client", 400),
+                    "invalid_client_metadata"
+                    | "invalid_redirect_uri"
+                    | "unauthorized_client"
+                    | "invalid_client" => (e.code, 400),
                     "UNAUTHENTICATED" => ("access_denied", 401),
                     "FORBIDDEN" => ("access_denied", 403),
                     "NOT_FOUND" => ("invalid_request", 404),
@@ -212,7 +229,9 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         response
     }
     async fn oauth_action(&self, r: &Request) -> Result<Response> {
-        self.oauth.as_ref().ok_or_else(Error::not_found)?;
+        if !self.oauth_enabled() {
+            return Err(Error::not_found());
+        }
         if r.headers
             .get("origin")
             .is_some_and(|o| o != &self.config.public_origin)
@@ -233,10 +252,18 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         }
         if r.method == "GET" && r.path == "/.well-known/oauth-authorization-server" {
             let origin = &self.config.public_origin;
-            return Ok(Response::json(
-                200,
-                json!({"issuer":origin,"authorization_endpoint":format!("{origin}/oauth/authorize"),"token_endpoint":format!("{origin}/oauth/token"),"revocation_endpoint":format!("{origin}/oauth/revoke"),"device_authorization_endpoint":format!("{origin}/oauth/device_authorization"),"response_types_supported":["code"],"grant_types_supported":["authorization_code","refresh_token","urn:ietf:params:oauth:grant-type:device_code"],"token_endpoint_auth_methods_supported":["none"],"revocation_endpoint_auth_methods_supported":["none"],"code_challenge_methods_supported":["S256"],"scopes_supported":["waypost"],"authorization_response_iss_parameter_supported":true,"client_id_metadata_document_supported":false}),
-            ));
+            let mut metadata = json!({"issuer":origin,"authorization_endpoint":format!("{origin}/oauth/authorize"),"token_endpoint":format!("{origin}/oauth/token"),"revocation_endpoint":format!("{origin}/oauth/revoke"),"device_authorization_endpoint":format!("{origin}/oauth/device_authorization"),"response_types_supported":["code"],"grant_types_supported":["authorization_code","refresh_token","urn:ietf:params:oauth:grant-type:device_code"],"token_endpoint_auth_methods_supported":["none"],"revocation_endpoint_auth_methods_supported":["none"],"code_challenge_methods_supported":["S256"],"scopes_supported":["waypost"],"authorization_response_iss_parameter_supported":true,"client_id_metadata_document_supported":self.oauth_discovery.is_some() && self.oauth_metadata_fetcher.is_some()});
+            if self
+                .oauth_discovery
+                .as_ref()
+                .is_some_and(|c| c.dynamic_registration)
+            {
+                metadata["registration_endpoint"] = json!(format!("{origin}/oauth/register"));
+            }
+            return Ok(Response::json(200, metadata));
+        }
+        if r.path == "/oauth/register" {
+            return self.oauth_register(r).await;
         }
         if r.path == "/oauth/authorize" && r.method == "GET" {
             return self.oauth_authorize(r, parse_params(&r.query)?).await;

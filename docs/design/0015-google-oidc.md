@@ -35,7 +35,7 @@ Google 模式只信任固定 Google 端点；不从 JWT 的 issuer、jku、x5u �
 4. 保持新账号注册默认关闭。确定目标用户准入方式后才设置受控注册上限。上限为 1 并不等于只允许指定 Google 用户，首个符合提供方准入的登录者可能占用该名额。
 5. 用真实用户验证登录、原空间认领、恢复、注销，以及 Google 失败时旧客户端可继续工作。生产切换邀请制前必须完成恢复闭环。
 
-Google Web client 用于人类登录；Codex/Claude 使用 Waypost 自己的 `WAYPOST_OAUTH_CLIENTS` 公共客户端注册。两者不能共用 Google secret。MCP resource 为 `https://waypost.miles1150.top/mcp`，回调按实际宿主精确登记，参见[客户端兼容](0012-native-oauth-compatibility.md)。
+Google Web client 只用于人类登录；MCP 宿主通过 Waypost 的客户端发现与自动注册接入，不能共用 Google secret。新版使用显式 `WAYPOST_OAUTH_CLIENT_DISCOVERY`，Worker 默认通用 DCR，安全原生 fetch 可用时支持 CIMD；不是让用户手填 `WAYPOST_OAUTH_CLIENTS`。旧列表须按[客户端迁移指南](../oauth-client-migration.md)离线导入、核对后移除旧运行变量，新版会拒绝仍含旧变量的配置。MCP resource 为该部署的固定 `/mcp` URL；普通宿主接入见[MCP OAuth setup](../mcp-oauth-setup.md)，能力和验收边界见[客户端发现设计](0017-oauth-client-discovery.md)。
 
 ## 发布与回滚边界
 

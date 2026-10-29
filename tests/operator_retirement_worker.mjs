@@ -27,7 +27,7 @@ print(json.dumps(out))
 const bindings={PUBLIC_ORIGIN:origin,WAYPOST_OPERATOR_MODE:'disabled',WAYPOST_CSRF_SECRET:secret(),WAYPOST_CURSOR_SECRET:secret(),WAYPOST_ACCOUNT_SIGNUP_LIMIT:'0',WAYPOST_ONBOARDING_MODE:'accounts',
   WAYPOST_ENCRYPTION_KEYS:JSON.stringify({active:'test',keys:{test:randomBytes(32).toString('hex')}}),
   WAYPOST_OIDC_CONFIG:JSON.stringify({issuer:'https://issuer.example',client_id:'test-client',authorization_endpoint:'https://issuer.example/authorize',token_endpoint:'https://issuer.example/token',keys:[{kid:'test',n:key.n,e:key.e}]}),
-  WAYPOST_OAUTH_CLIENTS:JSON.stringify({clients:[{client_id:'local-mcp-test',name:'Local fixture',redirect_uris:['http://127.0.0.1:8765/callback']}]})};
+  WAYPOST_OAUTH_CLIENT_DISCOVERY:JSON.stringify({dynamic_registration:true})};
 let unexpectedOutbound=0,phase='setup';
 const options={modules:true,scriptPath:root+'build/index.js',modulesRules:[{type:'CompiledWasm',include:['**/*.wasm'],fallthrough:true}],compatibilityDate:'2026-07-17',log:new Log(LogLevel.NONE),d1Databases:{DB:'operator-retirement-local'},r2Buckets:['OBJECTS'],bindings,outboundService:()=>{unexpectedOutbound++;throw new Error('External network forbidden');}};
 const mf=new Miniflare(options);
@@ -41,14 +41,15 @@ let csrf='';
 async function account(path,body={},cookie=accountCookie){if(['/account/connections/revoke','/account/oauth/revoke','/account/identities/disable','/account/primary/set'].includes(path))body={space_id:'space_a',...body};return response(path,{method:'POST',body,headers:{origin,cookie:'waypost_account='+cookie,'x-waypost-csrf':csrf}});}
 const agent=(path,body,token=tokens.keep)=>response(path,{method:body===undefined?'GET':'POST',body,headers:{authorization:'Bearer '+token}});
 try {
-  for(const invalid of ['missing OIDC','missing CSRF','missing cursor','reused independent keys','enabled without admin']) {
+  for(const invalid of ['missing OIDC','missing CSRF','missing cursor','reused independent keys','enabled without admin','legacy static client variable']) {
     phase='reject configuration: '+invalid;
     const invalidBindings={...bindings};
-    if(invalid==='missing OIDC'){delete invalidBindings.WAYPOST_OIDC_CONFIG;delete invalidBindings.WAYPOST_OAUTH_CLIENTS;delete invalidBindings.WAYPOST_ONBOARDING_MODE;}
+    if(invalid==='missing OIDC'){delete invalidBindings.WAYPOST_OIDC_CONFIG;delete invalidBindings.WAYPOST_OAUTH_CLIENT_DISCOVERY;delete invalidBindings.WAYPOST_ONBOARDING_MODE;}
     if(invalid==='missing CSRF')delete invalidBindings.WAYPOST_CSRF_SECRET;
     if(invalid==='missing cursor')delete invalidBindings.WAYPOST_CURSOR_SECRET;
     if(invalid==='reused independent keys')invalidBindings.WAYPOST_CURSOR_SECRET=invalidBindings.WAYPOST_CSRF_SECRET;
     if(invalid==='enabled without admin')invalidBindings.WAYPOST_OPERATOR_MODE='enabled';
+    if(invalid==='legacy static client variable')invalidBindings.WAYPOST_OAUTH_CLIENTS=JSON.stringify({clients:[]});
     const rejected=new Miniflare({...options,bindings:invalidBindings});
     try {const r=await rejected.dispatchFetch(origin+'/health');assert([500,503].includes(r.status));await r.text();}
     finally {await rejected.dispose();}
@@ -58,6 +59,8 @@ try {
   for(const sql of statements)await db.prepare(sql).run();
   await db.prepare('CREATE TABLE d1_migrations(name TEXT PRIMARY KEY)').run();
   for(const name of await readdir(root+'migrations'))if(name.endsWith('.sql'))await db.prepare('INSERT INTO d1_migrations(name) VALUES(?)').bind(name).run();
+  const registration=await response('/oauth/register',{method:'POST',body:{client_name:'Operator retirement fixture',redirect_uris:['http://127.0.0.1:8765/callback'],token_endpoint_auth_method:'none',grant_types:['authorization_code','refresh_token'],response_types:['code'],scope:'waypost'}});
+  assert.equal(registration.status,201);const dynamicClient=registration.value.client_id;
   const now=Date.now();
   await db.batch([
     db.prepare("INSERT INTO accounts(account_id,issuer,subject,created_at) VALUES('account_a','https://issuer.example','synthetic-a',?),('account_b','https://issuer.example','synthetic-b',?)").bind(now,now),
@@ -76,7 +79,7 @@ try {
       return db.prepare('INSERT INTO tokens(token_id,token_digest,space_id,actor_id,consumer_id,created_at,credential_kind,expires_at) VALUES(?,?,?,?,?,?,?,?)').bind('token_'+name,digest(token),'space_'+label,'actor_'+label,'consumer_'+label,now,name.startsWith('oauth')?'oauth':'legacy',now+300000);
     }),
     ...['a','other'].flatMap(label=>[
-      db.prepare("INSERT INTO oauth_families(family_id,client_id,resource,scope,account_id,space_id,actor_id,consumer_id,created_at,expires_at) VALUES(?,'local-mcp-test',?,'waypost','account_a',?,?,?,?,?)").bind('family_'+label,origin+'/mcp','space_'+label,'actor_'+label,'consumer_'+label,now,now+3600000),
+      db.prepare("INSERT INTO oauth_families(family_id,client_id,resource,scope,account_id,space_id,actor_id,consumer_id,created_at,expires_at,client_revision) VALUES(?,?,?,'waypost','account_a',?,?,?,?,?,1)").bind('family_'+label,dynamicClient,origin+'/mcp','space_'+label,'actor_'+label,'consumer_'+label,now,now+3600000),
       db.prepare('INSERT INTO oauth_access_tokens(token_id,family_id) VALUES(?,?)').bind(label==='a'?'token_oauth':'token_oauth_other','family_'+label),
     ]),
   ]);
@@ -202,7 +205,7 @@ try {
   ok(await agent('/v0/messages/'+message.message_id));
   ok(await agent('/v0/describe',undefined,tokens.oauth_other));
   assert.equal(unexpectedOutbound,0);
-  console.log(JSON.stringify({result:'passed',runtime:'actual compiled Worker/local Miniflare D1',identity:'synthetic seeded accounts, sessions and historical credentials',missing_admin_secret:true,invalid_configurations_rejected:5,retained_admin_secret_disabled:true,operator_bearer_and_cookie_denied:true,legacy_agent_data:true,account_cookie_dashboard_bootstrap:true,explicit_account_mode_ignores_old_admin_cookie:true,invalid_account_no_legacy_fallback:true,dashboard_memory_read:true,dashboard_csrf_and_space_boundaries:true,selected_space_management:true,expired_session_denied:true,stale_space_intent_denied:true,account_and_scoped_owner_readiness:true,scoped_connection_and_oauth_revoke:true,self_managed_identity_and_primary:true,existing_recovery_compatibility:true,new_recovery_key_issued:false,external_requests:unexpectedOutbound,production_verified:false}));
+  console.log(JSON.stringify({result:'passed',runtime:'actual compiled Worker/local Miniflare D1',identity:'synthetic seeded accounts, sessions and historical credentials',missing_admin_secret:true,invalid_configurations_rejected:6,retained_admin_secret_disabled:true,operator_bearer_and_cookie_denied:true,legacy_agent_data:true,account_cookie_dashboard_bootstrap:true,explicit_account_mode_ignores_old_admin_cookie:true,invalid_account_no_legacy_fallback:true,dashboard_memory_read:true,dashboard_csrf_and_space_boundaries:true,selected_space_management:true,expired_session_denied:true,stale_space_intent_denied:true,account_and_scoped_owner_readiness:true,scoped_connection_and_oauth_revoke:true,self_managed_identity_and_primary:true,existing_recovery_compatibility:true,new_recovery_key_issued:false,external_requests:unexpectedOutbound,production_verified:false}));
 } catch(error) {
   console.error(JSON.stringify({result:'failed',phase,error_type:error.constructor.name,assertion_line:error.stack?.split('\n').find(line=>line.includes('operator_retirement_worker.mjs:'))?.trim(),actual:typeof error.actual==='number'?error.actual:undefined,expected:typeof error.expected==='number'?error.expected:undefined}));process.exitCode=1;
 } finally {await mf.dispose();}

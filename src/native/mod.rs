@@ -1,3 +1,4 @@
+pub mod oauth_client_metadata;
 pub mod server;
 use crate::{
     error::{Error, Result},

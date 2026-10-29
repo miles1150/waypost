@@ -15,3 +15,8 @@ mod cloudflare;
 pub use service::accounts_oidc;
 
 pub use service::oauth::{OAuthClient, OAuthConfig};
+
+pub use service::oauth_client_registry;
+pub use service::oauth_client_registry::{
+    OAuthClientDiscoveryConfig, OAuthClientMetadataDocument, OAuthClientMetadataFetcher,
+};
