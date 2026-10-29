@@ -1,6 +1,7 @@
 'use strict';
 const $ = selector => document.querySelector(selector);
 let csrf = '', spaces = [], actors = [], sid = '', tab = 'inbox', cursor = null, loadEpoch = 0, authEpoch = 0, pageSize = 20, operator = false, primaryState = {revision: 0, primary_assistant: null};
+let onboarding = {invitations_enabled:false, accounts_enabled:false};
 let reportHistory = [];
 let inboxHead = null, updateTimer = null, checkingUpdates = false;
 function stopUpdates() {clearTimeout(updateTimer); updateTimer = null; $('#new-messages').hidden = true; $('#sync-status').hidden = true;}
@@ -39,6 +40,7 @@ function actionButton(key, text, action, cls = 'secondary') {const node = button
 function notice(message) {$('#notice').textContent = message; $('#notice').hidden = !message; $('#login-error').textContent = message; $('#detail-error').textContent = message; $('#detail-error').hidden = !message;}
 async function busy(node, action) {node.disabled = true; try {notice(''); await action();} catch (error) {notice(error.message);} finally {node.disabled = node.getAttribute('aria-disabled') === 'true';}}
 async function api(path, method = 'GET', body) {
+  if (!onboarding.invitations_enabled && (/^\/admin\/(access-request|invitation)$/.test(path) || path.includes('/invitations') || path === '/admin/v0/access-requests')) throw new Error(t('login.onboardingUnavailable'));
   const generation = authEpoch;
   const response = await fetch(path, {method, credentials: 'same-origin', headers: {'content-type': 'application/json', 'x-waypost-csrf': csrf}, body: body === undefined ? undefined : JSON.stringify(body)});
   const result = await response.json();
@@ -56,7 +58,7 @@ async function readBytes(path) {
   return bytes;
 }
 function showLogin() {authEpoch++; loadEpoch++; stopUpdates(); reportHistory = []; inboxHead = null; primaryState = {revision: 0, primary_assistant: null}; operator = false; csrf = ''; spaces = []; actors = []; sid = ''; tab = 'inbox'; finishCreation(); $('#detail').close(); $('#detail-title').textContent = ''; $('#app').hidden = true; $('#login').hidden = false; $('#content').replaceChildren(); $('#detail-body').replaceChildren();}
-async function entered(session) {authEpoch++; primaryState = {revision: 0, primary_assistant: null}; spaces = []; actors = []; sid = ''; $('#space').replaceChildren(); $('#content').replaceChildren(); $('#add-agent').hidden = true; pageSize = Math.max(1, Math.min(20, session.limits?.max_page_size || 20)); operator = session.operator; $('#service-management').hidden = !operator; $('#operator-label').hidden = !operator; $('#invite-user').hidden = !operator; $('#access-requests-tab').hidden = !operator; csrf = session.csrf_token; $('#new-space').hidden = !session.operator; $('#owner-credential').hidden = !session.operator; $('#login').hidden = true; $('#app').hidden = false; await loadSpaces();}
+async function entered(session) {authEpoch++; primaryState = {revision: 0, primary_assistant: null}; spaces = []; actors = []; sid = ''; $('#space').replaceChildren(); $('#content').replaceChildren(); $('#add-agent').hidden = true; pageSize = Math.max(1, Math.min(20, session.limits?.max_page_size || 20)); operator = session.operator; $('#service-management').hidden = !operator; $('#operator-label').hidden = !operator; $('#invite-user').hidden = !operator || !onboarding.invitations_enabled; $('#access-requests-tab').hidden = !operator || !onboarding.invitations_enabled; csrf = session.csrf_token; $('#new-space').hidden = !session.operator; $('#owner-credential').hidden = !session.operator; $('#login').hidden = true; $('#app').hidden = false; await loadSpaces();}
 async function registry(kind, space_id) {
   let cursor = null; const items = [];
   do {const result = await api('/admin/v0/registry', 'POST', {kind, ...(space_id ? {space_id} : {}), cursor, limit: pageSize}); items.push(...result.items); cursor = result.has_more ? result.next_cursor : null;} while (cursor);
@@ -78,6 +80,7 @@ async function load(append = false) {
   $('#add-agent').hidden = !['agents', 'inbox'].includes(tab) || !sid;
   $('#subtitle').textContent = sections[tab].note;
   if (!append) {$('#content').replaceChildren(); cursor = null; $('#more').hidden = true; $('#new-messages').hidden = true;}
+  if (tab === 'access' && !onboarding.invitations_enabled) {tab = 'inbox'; return load();}
   if (tab === 'access') {const result = await api('/admin/v0/access-requests', 'POST', {limit: pageSize, cursor}); if (epoch !== loadEpoch) return; cursor = result.next_cursor; renderAccessRequests(result.items); $('#more').hidden = !result.has_more; return;}
   if (!sid) {$('#content').append(el('div', t('empty.noSpace'), 'empty')); return;}
   const loadedActors = await registry('actors', spaceId);
@@ -424,6 +427,7 @@ function renderAccessRequests(items) {
 }
 
 function openInvitation(access = null) {
+  if (!onboarding.invitations_enabled) throw new Error(t('login.onboardingUnavailable'));
   const pending = pendingCreation();
   if (pending) {if (pending.type !== 'invite') throw new Error(t('ob.resumeOther')); return createInvitation(pending.name);}
   const form = el('form'), label = el('label', t('inviteName')), input = el('input'), submit = el('button', t('inviteCreate'));
@@ -434,6 +438,7 @@ function openInvitation(access = null) {
 }
 
 async function createInvitation(name, access = null) {
+  if (!onboarding.invitations_enabled) throw new Error(t('login.onboardingUnavailable'));
   const epoch = authEpoch;
   let task = pendingCreation();
   if (!task) {task = {type: 'invite', name, prefix: crypto.randomUUID(), access_request_id: access?.request_id || null, sid: access?.space_id || null}; saveCreation(task);}
@@ -454,6 +459,7 @@ async function createInvitation(name, access = null) {
 
 $('#invite-user').addEventListener('click', () => busy($('#invite-user'), () => openInvitation()));
 $('#request-access').addEventListener('click', () => {
+  if (!onboarding.invitations_enabled) {notice(t('login.onboardingUnavailable')); return;}
   const form = el('form'), label = el('label', t('email')), input = el('input'), submit = el('button', t('requestButton'));
   input.type = 'email'; input.required = true; input.autocomplete = 'email'; label.append(input); submit.type = 'submit';
   const requestId = crypto.randomUUID();
@@ -467,6 +473,23 @@ $('#request-access').addEventListener('click', () => {
 
 async function startOnboardingSession() {
   const parameters = new URLSearchParams(location.hash.slice(1)), invitation = parameters.get('invite');
+  const oldLink = parameters.has('invite') || parameters.has('request-access');
+  if (oldLink) history.replaceState(null, '', location.pathname + location.search);
+  try {
+    const metadata = await api('/onboarding');
+    onboarding = {invitations_enabled:metadata.invitations_enabled === true, accounts_enabled:metadata.accounts_enabled === true && metadata.account_url === '/account'};
+  } catch { /* Runtime metadata must fail closed even when static assets are cached. */ }
+  $('#request-access').hidden = !onboarding.invitations_enabled;
+  $('#account-setup').hidden = !onboarding.accounts_enabled;
+  $('#account-setup-app').hidden = !onboarding.accounts_enabled;
+  $('#invite-user').hidden = !operator || !onboarding.invitations_enabled;
+  $('#access-requests-tab').hidden = !operator || !onboarding.invitations_enabled;
+  if (!onboarding.invitations_enabled && pendingCreation()?.type === 'invite') finishCreation();
+  if (oldLink && !onboarding.invitations_enabled) {
+    try {await entered(await api('/admin/session'));} catch {showLogin();}
+    notice(t(onboarding.accounts_enabled ? 'login.accountSetupRequired' : 'login.onboardingUnavailable'));
+    return;
+  }
   if (!invitation) {const requesting = parameters.has('request-access'); if (requesting) history.replaceState(null, '', location.pathname + location.search); try {await entered(await api('/admin/session'));} catch {showLogin(); if (requesting) $('#request-access').click();} return;}
   history.replaceState(null, '', location.pathname + location.search);
   let session;

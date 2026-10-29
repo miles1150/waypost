@@ -47,6 +47,14 @@ pub const MIGRATIONS: &[(&str, &str)] = &[
         "0012_space_membership.sql",
         include_str!("../../migrations/0012_space_membership.sql"),
     ),
+    (
+        "0013_personal_accounts.sql",
+        include_str!("../../migrations/0013_personal_accounts.sql"),
+    ),
+    (
+        "0014_mcp_oauth.sql",
+        include_str!("../../migrations/0014_mcp_oauth.sql"),
+    ),
 ];
 
 #[cfg(test)]

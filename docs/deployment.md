@@ -110,6 +110,6 @@ python3 scripts/verify_cloudflare_restore.py \
 
 ## 当前协议边界
 
-服务提供持久信箱、独立 Consumer 回执、Blob、来源记忆和操作检查。它不执行模型、私人聊天抓取、语义合并或后台任务。`oauth`、`webhook_events`、`server_export` 为 false；客户端导出完整 SQLite/文件包可用。
+服务提供持久信箱、独立 Consumer 回执、Blob、来源记忆和操作检查。它不执行模型、私人聊天抓取、语义合并或后台任务。`oauth` 仅在显式配置[预注册客户端 OAuth](design/0010-mcp-oauth.md)时为 true；`webhook_events`、`server_export` 为 false；客户端导出完整 SQLite/文件包可用。
 
 v0.1 不自动裁剪已发布历史。Tombstone 是逻辑删除，不代表历史字节或其他客户端副本已被物理清除。可通过 `WAYPOST_CURSOR_SECRET` 独立设置游标签名密钥。内容使用单独的 `WAYPOST_ENCRYPTION_KEYS`，旧数据迁移与用户隔离见 [安全说明](security.md)；Actor 凭据按同权限轮换保持游标与 Actor 幂等有效。

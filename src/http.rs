@@ -44,6 +44,9 @@ pub(crate) fn classify<'a>(method: &str, path: &'a str) -> Route<'a> {
         (_, "/admin/session" | "/admin/invitation" | "/admin/access-request") => {
             return AdminSession;
         }
+        (_, path) if (path.starts_with("/account/") || path.starts_with("/oauth/")) => {
+            return AdminSession;
+        }
         (_, "/mcp") => return Mcp,
         ("GET", "/v0/describe") => return Describe,
         ("POST", "/v0/uploads") => return UploadPrepare,
@@ -173,9 +176,11 @@ fn templated_path(path: &str) -> String {
     format!("/{templated}")
 }
 
+#[derive(Clone)]
 pub struct Request {
     pub method: String,
     pub path: String,
+    pub query: String,
     pub headers: BTreeMap<String, String>,
     pub body: Vec<u8>,
 }
@@ -185,6 +190,7 @@ impl Request {
         Self {
             method: method.into(),
             path: path.into(),
+            query: String::new(),
             headers: BTreeMap::from([
                 ("authorization".into(), format!("Bearer {token}")),
                 ("content-type".into(), "application/json".into()),

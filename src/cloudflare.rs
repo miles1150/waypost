@@ -452,6 +452,8 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
     let route = crate::http::classify(raw.method().as_ref(), &path);
     let limiter = if matches!(route, crate::http::Route::AdminSession)
         && raw.method() == worker::Method::Post
+        && path != "/account/devices/token"
+        && path != "/oauth/token"
     {
         admin_limiter.ok()
     } else if matches!(
@@ -471,6 +473,10 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
             .limit(format!("ip:{}", hex::encode(Sha256::digest(ip.as_bytes()))))
             .await?;
         if !outcome.success {
+            if path.starts_with("/oauth/") {
+                log_structured(&route_name, "RATE_LIMITED", None);
+                return convert(crate::service::oauth::rate_limited_response());
+            }
             let mut response = log_and_error(
                 &route_name,
                 Error::new("RATE_LIMITED", "Request rate limit exceeded; retry later."),
@@ -499,6 +505,46 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
         config,
     )
     .with_limits(limits);
+    let app = if let Ok(raw_config) = env.secret("WAYPOST_OIDC_CONFIG") {
+        let configured: Result<_> = (|| {
+            let config: crate::service::accounts_oidc::OidcConfig =
+                serde_json::from_str(&raw_config.to_string())
+                    .map_err(|_| Error::internal("OIDC configuration"))?;
+            let exchange = crate::service::accounts_oidc::OidcHttpExchange::new(&config)?;
+            let limit = env
+                .var("WAYPOST_ACCOUNT_SIGNUP_LIMIT")
+                .map(|v| v.to_string())
+                .unwrap_or_else(|_| "0".into())
+                .parse::<usize>()
+                .map_err(|_| Error::internal("account signup limit"))?;
+            app.with_accounts(config, std::rc::Rc::new(exchange), limit)
+        })();
+        match configured {
+            Ok(app) => app,
+            Err(_) => return log_and_error(&route_name, Error::internal("OIDC configuration")),
+        }
+    } else {
+        app
+    };
+    let app = if let Ok(raw) = env.var("WAYPOST_OAUTH_CLIENTS") {
+        let configured = serde_json::from_str::<crate::OAuthConfig>(&raw.to_string())
+            .map_err(|_| Error::internal("OAuth configuration"))
+            .and_then(|config| app.with_oauth(config));
+        match configured {
+            Ok(app) => app,
+            Err(_) => return log_and_error(&route_name, Error::internal("OAuth configuration")),
+        }
+    } else {
+        app
+    };
+    let onboarding = env
+        .var("WAYPOST_ONBOARDING_MODE")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|_| "legacy".into());
+    let app = match app.with_onboarding_mode(&onboarding) {
+        Ok(app) => app,
+        Err(_) => return log_and_error(&route_name, Error::internal("onboarding configuration")),
+    };
     let app = if let Ok(secret) = env.secret("WAYPOST_CURSOR_SECRET") {
         match app.with_cursor_secret(&secret.to_string()) {
             Ok(app) => app,
@@ -536,6 +582,7 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
     let mut request = Request {
         method: raw.method().to_string(),
         path: raw.path(),
+        query: raw.url()?.query().unwrap_or("").to_owned(),
         headers: raw.headers().entries().collect(),
         body: vec![],
     };

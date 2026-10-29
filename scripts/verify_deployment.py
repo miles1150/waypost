@@ -82,13 +82,14 @@ def verify(origin, admin_secret, check_rate_limit=False, check_api_rate_limit=Fa
     assert status == 200, 'Operator login failed.'
     cookie_header = headers.get('set-cookie', '')
     cookies = SimpleCookie(); cookies.load(cookie_header)
-    session = cookies['waypost_admin']
+    cookie_name = '__Host-waypost_admin' if parsed.scheme == 'https' else 'waypost_admin'
+    session = cookies[cookie_name]
     assert session['httponly'] and session['samesite'] == 'Strict', 'Unsafe operator cookie.'
     if parsed.scheme == 'https':
-        assert session['secure'], 'Operator cookie must use Secure over HTTPS.'
+        assert session['secure'] and session['path'] == '/' and not session['domain'], 'Operator cookie must be host-only and Secure over HTTPS.'
     csrf = body['data']['csrf_token']
     assert session.value not in csrf, 'CSRF value disclosed session credential.'
-    session_headers = {'cookie': 'waypost_admin=' + session.value, 'origin': origin}
+    session_headers = {'cookie': cookie_name + '=' + session.value, 'origin': origin}
     status, _, _ = request('POST', '/admin/v0/registry', {'kind': 'spaces', 'limit': 1}, session_headers)
     assert status == 403, 'Operator write accepted without CSRF.'
     session_headers['x-waypost-csrf'] = csrf
@@ -115,11 +116,12 @@ def verify(origin, admin_secret, check_rate_limit=False, check_api_rate_limit=Fa
         probe = """
 import {performance} from 'node:perf_hooks';
 const [origin, userAgent] = process.argv.slice(1);
+const cookieName = new URL(origin).protocol === 'https:' ? '__Host-waypost_admin' : 'waypost_admin';
 const started = performance.now();
 for (let count = 0; count < 640 && performance.now() - started < 45000; count += 8) {
   const results = await Promise.all(Array.from({length: 8}, async (_, i) => {
     const response = await fetch(origin + '/admin/session', {redirect: 'manual',
-      headers: {'user-agent': userAgent, cookie: 'waypost_admin=invalid_probe_' + (count + i)},
+      headers: {'user-agent': userAgent, cookie: cookieName + '=invalid_probe_' + (count + i)},
       signal: AbortSignal.timeout(15000)});
     const value = await response.json();
     if (response.status === 429 && value.error?.code === 'RATE_LIMITED') return true;

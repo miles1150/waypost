@@ -30,9 +30,10 @@
       </label>
       <button data-i18n="login.submit">Open inbox</button>
     </form>
-    <button id="request-access" type="button" class="secondary" data-i18n="login.requestAccess">Request an invitation</button>
+    <button id="request-access" hidden type="button" class="secondary" data-i18n="login.requestAccess">Request an invitation</button>
+    <a id="account-setup" href="/account" data-i18n="login.accountSetup" hidden>Open account setup</a>
     <p id="login-error" class="notice notice-inline" role="status"></p>
-    <p class="fine" data-i18n="login.fine">Open your inbox with the sign-in key you saved when claiming your invitation. Assistant connection details are configured separately after login. Self-hosted, enter with the service-management key from the data directory.</p>
+    <p class="fine" data-i18n="login.fine">Open your inbox with your saved sign-in key. Assistant connection details are configured separately after login. Self-hosted, enter with the service-management key from the data directory.</p>
   </div>
 </div>
 
@@ -66,6 +67,8 @@
         <button data-tab="receipts" data-i18n="nav.receipts">Receipts</button>
       </nav>
     </details>
+
+    <a id="account-setup-app" href="/account" data-i18n="login.accountSetup" hidden>Open account setup</a>
 
     <details id="service-management" hidden>
       <summary data-i18n="nav.serviceMgmt">Service management</summary>

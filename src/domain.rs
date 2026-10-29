@@ -242,6 +242,7 @@ pub(crate) enum OwnerAuthority {
     Operator,
     Credential(Vec<u8>),
     Session(Vec<u8>),
+    AccountSession(Vec<u8>),
 }
 #[derive(Debug, Clone)]
 pub struct Principal {

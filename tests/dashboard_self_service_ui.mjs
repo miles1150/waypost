@@ -13,6 +13,7 @@ async function dashboard(extra = () => null) {
   w.HTMLDialogElement.prototype.close=function(){this.open=false;this.dispatchEvent(new w.Event('close'));};
   const actors=[{actor_id:'agent-one',display_name:'Research assistant',kind:'agent',disabled:false}];
   w.fetch=async(path,options={})=>{
+    if(path==='/onboarding')return {ok:true,status:200,json:async()=>({ok:true,data:{invitations_enabled:true,accounts_enabled:false,account_url:null}})};
     if (typeof path === 'string' && path.includes('/dashboard/locales/')) {
       const file = path.split('/').pop();
       return {ok:true,status:200,json:async()=>JSON.parse(readFileSync(new URL('../dashboard/locales/'+file,import.meta.url),'utf8'))};

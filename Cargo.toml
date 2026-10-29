@@ -17,7 +17,7 @@ required-features = ["native"]
 
 [features]
 default = ["native"]
-native = ["dep:rusqlite", "dep:tokio", "dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:bytes"]
+native = ["dep:reqwest", "dep:rusqlite", "dep:tokio", "dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:bytes"]
 cloudflare = ["dep:worker", "dep:wasm-bindgen", "dep:js-sys", "dep:serde-wasm-bindgen"]
 
 [dependencies]
@@ -25,7 +25,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_jcs = "0.2"
 regex = "1"
-sha2 = "0.10"
+sha2 = { version = "0.10", features = ["oid"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"], optional = true }
+rsa = { version = "0.9", default-features = false, features = ["std", "pem", "sha2"] }
+url = "2"
 hmac = "0.12"
 hpke = { version = "0.14.1", default-features = false, features = ["alloc", "x25519", "chacha"] }
 rand_chacha = "0.10"

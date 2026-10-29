@@ -2,7 +2,7 @@
 pub const AUTHENTICATE: &str = "SELECT t.token_id,t.space_id,t.actor_id,t.consumer_id,t.authority_version AS credential_version,a.authority_version AS actor_version,c.view,c.view_revision,s.default_actor_id,COALESCE(t.default_recipient_id,s.default_actor_id) AS default_recipient_id,
  (SELECT json_group_array(json_object('dimension',dimension,'value',value)) FROM (SELECT dimension,value FROM consumer_filters WHERE space_id=t.space_id AND consumer_id=t.consumer_id ORDER BY dimension,value)) AS filters_json
  FROM tokens t JOIN actors a ON a.space_id=t.space_id AND a.actor_id=t.actor_id JOIN consumers c ON c.space_id=t.space_id AND c.consumer_id=t.consumer_id AND c.actor_id=t.actor_id JOIN spaces s ON s.space_id=t.space_id
- WHERE t.token_digest=? AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at>?) AND a.disabled=0 AND c.disabled=0";
+ WHERE t.token_digest=? AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at>?) AND a.disabled=0 AND c.disabled=0 AND (NOT EXISTS(SELECT 1 FROM account_devices ad WHERE ad.token_id=t.token_id) OR EXISTS(SELECT 1 FROM account_devices ad JOIN accounts ac ON ac.account_id=ad.account_id JOIN account_spaces asp ON asp.account_id=ac.account_id AND asp.space_id=ad.space_id WHERE ad.token_id=t.token_id AND ad.state='consumed' AND ac.disabled=0 AND ad.space_id=t.space_id))";
 
 pub const SUBMISSION_BY_REQUEST: &str =
     "SELECT * FROM submissions WHERE space_id=? AND producer_id=? AND operation=? AND request_id=?";

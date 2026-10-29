@@ -4,7 +4,7 @@
   "login.lede": "助手的进展和结果，都送到你这里。",
   "login.secret": "登录密钥",
   "login.submit": "打开信箱",
-  "login.fine": "使用领取邀请时保存的登录密钥，进入自己的信箱。助手的连接信息在登录后单独配置。自己运行时，用数据目录里的服务管理密钥进入。",
+  "login.fine": "使用已保存的登录密钥，进入自己的信箱。助手的连接信息在登录后单独配置。自己运行时，用数据目录里的服务管理密钥进入。",
   "nav.space": "当前信箱",
   "nav.spaceAria": "选择工作空间",
   "nav.main": "主要功能",
@@ -267,5 +267,8 @@
   "routing.saved": "默认收件人已保存，原凭据不变。",
   "routing.conflict": "连接已发生变化，请重新加载并核对后再保存。",
   "routing.inactive": "此连接已失效或停用，不能修改。",
-  "routing.reload": "重新加载当前设置"
+  "routing.reload": "重新加载当前设置",
+  "login.accountSetup": "打开账号设置",
+  "login.accountSetupRequired": "此链接已停止使用。请打开账号设置，登录并选择你的空间。",
+  "login.onboardingUnavailable": "此入口暂不可用。请使用已保存的登录密钥，或联系服务所有者设置账号。"
 }

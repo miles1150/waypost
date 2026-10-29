@@ -35,9 +35,21 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             } else {
                 OwnerAuthority::Credential(digest)
             }
+        } else if super::dashboard::uses_account_session(request, &self.config.public_origin) {
+            OwnerAuthority::AccountSession(
+                Sha256::digest(
+                    super::accounts::account_cookie(request, &self.config.public_origin)?
+                        .as_bytes(),
+                )
+                .to_vec(),
+            )
         } else {
             OwnerAuthority::Session(
-                Sha256::digest(super::dashboard::session_cookie(request)?.as_bytes()).to_vec(),
+                Sha256::digest(
+                    super::dashboard::session_cookie(request, &self.config.public_origin)?
+                        .as_bytes(),
+                )
+                .to_vec(),
             )
         };
         let rows = self.db.query(Statement::new("SELECT s.default_actor_id,s.default_consumer_id,a.authority_version,c.view_revision FROM spaces s JOIN actors a ON a.space_id=s.space_id AND a.actor_id=s.default_actor_id JOIN consumers c ON c.space_id=s.space_id AND c.consumer_id=s.default_consumer_id WHERE s.space_id=? AND a.disabled=0 AND c.disabled=0",vec![sid.into()])).await?;
@@ -74,6 +86,14 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             OwnerAuthority::Credential(digest) => {
                 args.extend([p.space_id.clone().into(), digest.clone().into()]);
                 "EXISTS(SELECT 1 FROM space_admin_credentials oc WHERE oc.space_id=? AND oc.credential_digest=? AND oc.revoked_at IS NULL)".into()
+            }
+            OwnerAuthority::AccountSession(digest) => {
+                args.extend([
+                    digest.clone().into(),
+                    self.clock.now_ms().into(),
+                    p.space_id.clone().into(),
+                ]);
+                "EXISTS(SELECT 1 FROM account_sessions acs JOIN accounts ac ON ac.account_id=acs.account_id JOIN account_spaces asp ON asp.account_id=ac.account_id AND asp.space_id=acs.selected_space_id WHERE acs.session_digest=? AND acs.expires_at>? AND ac.disabled=0 AND asp.space_id=?)".into()
             }
             OwnerAuthority::Session(digest) => {
                 args.extend([
@@ -372,3 +392,83 @@ fn edit_conflict(current: i64) -> Error {
 #[cfg(all(test, feature = "native"))]
 #[path = "dashboard_memory_budget_tests.rs"]
 mod budget_tests;
+
+#[cfg(all(test, feature = "native"))]
+mod account_owner_tests {
+    use super::*;
+    use crate::native::{FileStore, SqliteDb};
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn account_owner_guard_requires_current_session_account_and_membership() {
+        let dir = tempfile::tempdir().unwrap();
+        let admin = "account-owner-guard-test-admin-secret";
+        let app = App::new(
+            SqliteDb::open(dir.path().join("db")).unwrap(),
+            FileStore::open(dir.path().join("objects")).unwrap(),
+            Config {
+                admin_secret: admin.into(),
+                public_origin: "http://localhost".into(),
+            },
+        );
+        let body = json!({"request_id":"setup","display_name":"Test"});
+        let space = app
+            .admin(
+                &Request::json("POST", "/admin/v0/spaces", admin, body.clone()),
+                body,
+            )
+            .await
+            .unwrap();
+        let sid = space["space_id"].as_str().unwrap();
+        let digest = Sha256::digest(b"account-session-test").to_vec();
+        app.db.batch(vec![
+            Statement::new("INSERT INTO accounts(account_id,issuer,subject,disabled,created_at) VALUES('account_test','https://issuer.example','subject',0,0)", vec![]),
+            Statement::new("INSERT INTO account_spaces(space_id,account_id,created_at) VALUES(?,'account_test',0)", vec![sid.into()]),
+            Statement::new("INSERT INTO account_sessions(session_digest,account_id,selected_space_id,expires_at,created_at) VALUES(?,'account_test',?,?,0)", vec![digest.clone().into(),sid.into(),i64::MAX.into()]),
+        ]).await.unwrap();
+        let mut principal = app
+            .dashboard_owner(
+                &Request::json("GET", "/admin/v0/spaces", admin, json!({})),
+                sid,
+                None,
+            )
+            .await
+            .unwrap();
+        principal.owner_authority = Some(OwnerAuthority::AccountSession(digest.clone()));
+        app.current(&principal).await.unwrap();
+        for (deny, restore) in [
+            (
+                "UPDATE accounts SET disabled=1",
+                "UPDATE accounts SET disabled=0",
+            ),
+            (
+                "UPDATE account_sessions SET expires_at=0",
+                "UPDATE account_sessions SET expires_at=9223372036854775807",
+            ),
+            (
+                "UPDATE account_sessions SET selected_space_id=NULL",
+                "UPDATE account_sessions SET selected_space_id=(SELECT space_id FROM account_spaces LIMIT 1)",
+            ),
+        ] {
+            app.db
+                .batch(vec![Statement::new(deny, vec![])])
+                .await
+                .unwrap();
+            assert!(app.current(&principal).await.is_err(), "{deny}");
+            app.db
+                .batch(vec![Statement::new(restore, vec![])])
+                .await
+                .unwrap();
+            app.current(&principal).await.unwrap();
+        }
+        app.db
+            .batch(vec![Statement::new(
+                "DELETE FROM account_spaces WHERE space_id=?",
+                vec![sid.into()],
+            )])
+            .await
+            .unwrap();
+        assert!(app.current(&principal).await.is_err());
+        app.db.batch(vec![Statement::new("INSERT INTO account_spaces(space_id,account_id,created_at) VALUES(?,'account_test',0)", vec![sid.into()]),Statement::new("DELETE FROM account_sessions WHERE session_digest=?",vec![digest.into()])]).await.unwrap();
+        assert!(app.current(&principal).await.is_err());
+    }
+}

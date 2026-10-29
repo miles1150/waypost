@@ -13,6 +13,9 @@ use hmac::{Hmac, Mac};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, rc::Rc};
+mod account_devices;
+mod accounts;
+pub mod accounts_oidc;
 mod admin;
 mod blobs;
 mod dashboard;
@@ -23,6 +26,9 @@ mod mailbox;
 mod maintenance;
 mod mcp;
 mod memory;
+pub mod oauth;
+mod oauth_authorization;
+mod oauth_tokens;
 mod onboarding;
 mod privacy;
 mod receipts;
@@ -86,6 +92,11 @@ pub struct App<D, O> {
     cursor_key: [u8; 32],
     csrf_key: [u8; 32],
     pub(crate) encryption: Option<encryption::Encryption>,
+    pub(crate) oidc: Option<accounts_oidc::OidcConfig>,
+    pub(crate) account_signup_limit: usize,
+    pub(crate) oauth: Option<oauth::OAuthConfig>,
+    pub(crate) invitations_enabled: bool,
+    pub(crate) oidc_exchange: Option<Rc<dyn accounts_oidc::OidcCodeExchange>>,
 }
 // SQL execution is sealed inside this crate; callers use supported runtimes and domain HTTP/MCP operations.
 #[allow(private_bounds)]
@@ -95,12 +106,36 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             cursor_key: derive_key(&config.admin_secret, b"waypost-cursor-v2"),
             csrf_key: derive_key(&config.admin_secret, b"waypost-admin-csrf-v2"),
             encryption: None,
+            oidc: None,
+            account_signup_limit: 0,
+            oauth: None,
+            invitations_enabled: true,
+            oidc_exchange: None,
             db,
             objects,
             config,
             clock: Rc::new(SystemClock),
             limits: Limits::default(),
         }
+    }
+    /// Retirement is opt-in and requires the replacement account path. Data is
+    /// retained so rollback can restore the legacy workflow without a down migration.
+    pub fn with_onboarding_mode(mut self, mode: &str) -> Result<Self> {
+        self.invitations_enabled = match mode {
+            "legacy" => true,
+            "accounts" if self.oidc.is_some() => false,
+            "accounts" => {
+                return Err(Error::invalid(
+                    "Account onboarding requires configured OIDC.",
+                ));
+            }
+            _ => {
+                return Err(Error::invalid(
+                    "Onboarding mode must be legacy or accounts.",
+                ));
+            }
+        };
+        Ok(self)
     }
     pub fn with_cursor_secret(mut self, secret: &str) -> Result<Self> {
         if secret.len() < 32 {
@@ -120,6 +155,37 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         self
     }
     pub async fn handle(&self, request: Request) -> Response {
+        if request.path == "/onboarding" && request.method == "GET" {
+            return Response::json(
+                200,
+                json!({"ok":true,"data":{
+                    "invitations_enabled":self.invitations_enabled,
+                    "accounts_enabled":self.oidc.is_some(),
+                    "account_url":if self.oidc.is_some() {Some("/account")} else {None}
+                }}),
+            );
+        }
+        let parts: Vec<_> = request.path.split('/').collect();
+        let invitation_route = matches!(
+            request.path.as_str(),
+            "/admin/access-request" | "/admin/invitation" | "/admin/v0/access-requests"
+        ) || (parts.len() >= 5
+            && parts[..4] == ["", "admin", "v0", "spaces"]
+            && parts.get(5) == Some(&"invitations"));
+        if !self.invitations_enabled && invitation_route {
+            return Response::json(
+                410,
+                json!({"ok":false,"error":{
+                    "code":"INVITATIONS_RETIRED","message":"Invitation onboarding is retired. Use account sign-in or existing space recovery.","details":{"account_url":"/account"}}
+                }),
+            );
+        }
+        if request.path.starts_with("/oauth/") || request.path.starts_with("/.well-known/oauth-") {
+            return self.oauth_handle(&request).await;
+        }
+        if request.path == "/account" || request.path.starts_with("/account/") {
+            return self.account_handle(&request).await;
+        }
         if let Some(response) = self.dashboard_asset(&request) {
             return response;
         }
@@ -133,7 +199,9 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             return self.admin_session(&request).await;
         }
         if request.path == "/mcp" {
-            return self.mcp(&request).await;
+            let mut response = self.mcp(&request).await;
+            self.oauth_challenge(&mut response);
+            return response;
         }
         let trace = match random_id("req") {
             Ok(v) => v,
@@ -245,11 +313,17 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         let token = bearer(request)?;
         let digest = Sha256::digest(token.as_bytes()).to_vec();
         let now = self.clock.now_ms();
+        let (oauth_guard, oauth_parameters) = self.oauth_authority_guard(now);
+        let mut parameters = vec![digest.into(), now.into()];
+        parameters.extend(oauth_parameters);
         let rows = self
             .db
             .query(Statement::new(
-                crate::storage::queries::AUTHENTICATE,
-                vec![digest.into(), now.into()],
+                format!(
+                    "{} AND {oauth_guard}",
+                    crate::storage::queries::AUTHENTICATE
+                ),
+                parameters,
             ))
             .await?;
         let row = rows.first().ok_or_else(Error::unauthenticated)?;
@@ -293,11 +367,42 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             filter_fingerprint,
         })
     }
+    // Both the initial authentication SELECT and final mutation guard use this
+    // predicate against token alias t. No separate ownership lookup can go stale.
+    fn oauth_authority_guard(&self, now: i64) -> (String, Vec<Sql>) {
+        let Some(config) = &self.oauth else {
+            return ("t.credential_kind='legacy'".into(), vec![]);
+        };
+        let clients = json!(
+            config
+                .clients
+                .iter()
+                .map(|c| &c.client_id)
+                .collect::<Vec<_>>()
+        )
+        .to_string();
+        ("(t.credential_kind='legacy' OR (t.credential_kind='oauth' AND EXISTS(SELECT 1 FROM oauth_access_tokens oat JOIN oauth_families ofa ON ofa.family_id=oat.family_id JOIN accounts oac ON oac.account_id=ofa.account_id JOIN account_spaces oas ON oas.account_id=ofa.account_id AND oas.space_id=ofa.space_id WHERE oat.token_id=t.token_id AND ofa.space_id=t.space_id AND ofa.actor_id=t.actor_id AND ofa.consumer_id=t.consumer_id AND ofa.scope='waypost' AND ofa.resource=? AND ofa.client_id IN(SELECT value FROM json_each(?)) AND ofa.revoked_at IS NULL AND ofa.expires_at>? AND oac.disabled=0 AND c.view='inbox')))".into(),vec![self.oauth_resource().into(),clients.into(),now.into()])
+    }
     pub(crate) fn authority_guard(&self, p: &Principal) -> (String, Vec<Sql>) {
         if p.owner_authority.is_some() {
             return self.owner_authority_guard(p);
         }
-        ("EXISTS(SELECT 1 FROM tokens t JOIN actors a ON a.space_id=t.space_id AND a.actor_id=t.actor_id JOIN consumers c ON c.space_id=t.space_id AND c.consumer_id=t.consumer_id WHERE t.token_id=? AND t.authority_version=? AND a.authority_version=? AND c.view_revision=? AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at>?) AND a.disabled=0 AND c.disabled=0)".into(),vec![p.token_id.clone().into(),p.credential_version.into(),p.actor_version.into(),p.view_revision.into(),self.clock.now_ms().into()])
+        let now = self.clock.now_ms();
+        let (oauth_guard, oauth_parameters) = self.oauth_authority_guard(now);
+        let mut parameters = vec![
+            p.token_id.clone().into(),
+            p.credential_version.into(),
+            p.actor_version.into(),
+            p.view_revision.into(),
+            now.into(),
+        ];
+        parameters.extend(oauth_parameters);
+        (
+            format!(
+                "EXISTS(SELECT 1 FROM tokens t JOIN actors a ON a.space_id=t.space_id AND a.actor_id=t.actor_id JOIN consumers c ON c.space_id=t.space_id AND c.consumer_id=t.consumer_id AND c.actor_id=t.actor_id WHERE t.token_id=? AND t.authority_version=? AND a.authority_version=? AND c.view_revision=? AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at>?) AND a.disabled=0 AND c.disabled=0 AND (NOT EXISTS(SELECT 1 FROM account_devices ad WHERE ad.token_id=t.token_id) OR EXISTS(SELECT 1 FROM account_devices ad JOIN accounts ac ON ac.account_id=ad.account_id JOIN account_spaces asp ON asp.account_id=ac.account_id AND asp.space_id=ad.space_id WHERE ad.token_id=t.token_id AND ad.state='consumed' AND ac.disabled=0 AND ad.space_id=t.space_id)) AND {oauth_guard})"
+            ),
+            parameters,
+        )
     }
     pub(crate) async fn current(&self, p: &Principal) -> Result<()> {
         let (guard, parameters) = self.authority_guard(p);
@@ -324,7 +429,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         }
         self.current(p).await?;
         Ok(
-            json!({"api_version":"0.1","space_id":p.space_id,"actor_id":p.actor_id,"consumer_id":p.consumer_id,"view_revision":p.view_revision,"default_recipient_id":p.default_recipient_id,"access_model":"space_membership","memory_collections":collections,"memory_collections_has_more":more,"limits":self.limits,"capabilities":{"privacy_filtering":true,"mailbox":true,"receipts":true,"blob_upload":true,"memory_snapshot":true,"memory_delta":true,"webhook_events":false,"oauth":false,"server_export":false}}),
+            json!({"api_version":"0.1","space_id":p.space_id,"actor_id":p.actor_id,"consumer_id":p.consumer_id,"view_revision":p.view_revision,"default_recipient_id":p.default_recipient_id,"access_model":"space_membership","memory_collections":collections,"memory_collections_has_more":more,"limits":self.limits,"capabilities":{"privacy_filtering":true,"mailbox":true,"receipts":true,"blob_upload":true,"memory_snapshot":true,"memory_delta":true,"webhook_events":false,"oauth":self.oauth.is_some(),"server_export":false}}),
         )
     }
     pub(crate) fn sign_cursor(&self, payload: &str) -> Result<String> {

@@ -4,7 +4,7 @@
   "login.lede": "Assistant progress and results, all delivered to you.",
   "login.secret": "Sign-in key",
   "login.submit": "Open inbox",
-  "login.fine": "Open your inbox with the sign-in key you saved when claiming your invitation. Assistant connection details are configured separately after login. Self-hosted, enter with the service-management key from the data directory.",
+  "login.fine": "Open your inbox with your saved sign-in key. Assistant connection details are configured separately after login. Self-hosted, enter with the service-management key from the data directory.",
   "nav.space": "Current inbox",
   "nav.spaceAria": "Pick a workspace",
   "nav.main": "Primary features",
@@ -267,5 +267,8 @@
   "routing.saved": "Default recipient saved. The credential is unchanged.",
   "routing.conflict": "The connection changed. Reload and check its current routing before saving.",
   "routing.inactive": "This connection is inactive and cannot be changed.",
-  "routing.reload": "Reload current routing"
+  "routing.reload": "Reload current routing",
+  "login.accountSetup": "Open account setup",
+  "login.accountSetupRequired": "This link is no longer available. Open account setup to sign in and select your Space.",
+  "login.onboardingUnavailable": "This entry is unavailable. Use your saved sign-in key, or contact the service owner for account setup."
 }
