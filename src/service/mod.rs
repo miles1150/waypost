@@ -265,7 +265,13 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             return self.admin_session(&request).await;
         }
         if request.path == "/mcp" {
-            let mut response = self.mcp(&request).await;
+            let mut response = crate::gateway::mcp::serve(
+                &mcp::WaypostTools(self),
+                &self.config.public_origin,
+                self.limits.max_json_bytes,
+                &request,
+            )
+            .await;
             self.oauth_challenge(&mut response);
             return response;
         }
