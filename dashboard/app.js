@@ -25,16 +25,16 @@ const t = (key, params) => window.WaypostI18n.t(key, params);
 // Each tab names itself and says what it holds. One table, so the wording
 // cannot drift between the sidebar, the page header and the empty state.
 const sections = {
-  inbox:       {title: t('tab.inbox.title'),     note: t('tab.inbox.note')},
-  agents:      {title: t('tab.agents.title'),     note: t('tab.agents.note')},
-  collections: {title: t('tab.collections.title'),     note: t('tab.collections.note')},
-  messages:    {title: t('tab.messages.title'), note: t('tab.messages.note')},
-  feed:        {title: t('tab.feed.title'), note: t('tab.feed.note')},
-  privacy:     {title: t('tab.privacy.title'), note: t('tab.privacy.note')},
-  tokens:      {title: t('tab.tokens.title'), note: t('tab.tokens.note')},
-  submissions: {title: t('tab.submissions.title'), note: t('tab.submissions.note')},
-  receipts:    {title: t('tab.receipts.title'), note: t('tab.receipts.note')},
-  access:      {title: t('accessTitle'), note: t('accessHelp')},
+  inbox:       {title: 'tab.inbox.title',     note: 'tab.inbox.note'},
+  agents:      {title: 'tab.agents.title',     note: 'tab.agents.note'},
+  collections: {title: 'tab.collections.title',     note: 'tab.collections.note'},
+  messages:    {title: 'tab.messages.title', note: 'tab.messages.note'},
+  feed:        {title: 'tab.feed.title', note: 'tab.feed.note'},
+  privacy:     {title: 'tab.privacy.title', note: 'tab.privacy.note'},
+  tokens:      {title: 'tab.tokens.title', note: 'tab.tokens.note'},
+  submissions: {title: 'tab.submissions.title', note: 'tab.submissions.note'},
+  receipts:    {title: 'tab.receipts.title', note: 'tab.receipts.note'},
+  access:      {title: 'accessTitle', note: 'accessHelp'},
 };
 function el(tag, text, cls) {const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (cls) node.className = cls; return node;}
 function button(text, action, cls = 'secondary') {const node = el('button', text, cls); node.type = 'button'; node.addEventListener('click', () => busy(node, action)); return node;}
@@ -100,10 +100,10 @@ async function loadSpaces() {
 }
 async function load(append = false) {
   const epoch = ++loadEpoch, spaceId = sid, currentTab = tab;
-  $('#title').textContent = sections[tab].title;
+  $('#title').textContent = t(sections[tab].title);
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   $('#add-agent').hidden = !['agents', 'inbox'].includes(tab) || !sid;
-  $('#subtitle').textContent = sections[tab].note;
+  $('#subtitle').textContent = t(sections[tab].note);
   if (!append) {$('#content').replaceChildren(); cursor = null; $('#more').hidden = true; $('#new-messages').hidden = true;}
   if (tab === 'access' && !onboarding.invitations_enabled) {tab = 'inbox'; return load();}
   if (tab === 'access') {const result = await api('/admin/v0/access-requests', 'POST', {limit: pageSize, cursor}); if (epoch !== loadEpoch) return; cursor = result.next_cursor; renderAccessRequests(result.items); $('#more').hidden = !result.has_more; return;}
@@ -233,7 +233,7 @@ function renderTable(items) {
         const generation = authEpoch;
         await window.WaypostMemory.open({spaceId,collection:item,sourceName:actorName(item.source_actor_id),api,readBytes,el,button,openDetail,run:busy,active:()=>spaceId===sid&&generation===authEpoch});
         return;
-      } else showDetail(sections[tab].title, item);
+      } else showDetail(t(sections[tab].title), item);
     }));
     if (tab === 'tokens' && !item.revoked_at && (!item.expires_at || new Date(item.expires_at).getTime() > Date.now())) action.append(actionButton('edit-routing', t('routing.edit'), () => editRouting(item, spaceId)));
     if (tab === 'tokens' && !item.revoked_at) action.append(button(t('token.revoke'), async () => {await api(`/admin/v0/spaces/${sid}/tokens/${item.token_id}`, 'DELETE', {}); await load();}));
@@ -411,6 +411,13 @@ async function editRouting(token, spaceId) {
 
 $('#add-agent').addEventListener('click', () => busy($('#add-agent'), () => openOnboarding()));
 startOnboardingSession();
+document.addEventListener('waypost:lang', () => {
+  configureLoginMode();
+  if (!$('#app').hidden) {
+    $('#title').textContent = t(sections[tab].title);
+    $('#subtitle').textContent = t(sections[tab].note);
+  }
+});
 
 $('#owner-credential').addEventListener('click', () => busy($('#owner-credential'), async () => {
   const epoch = authEpoch, spaceId = sid;
@@ -504,6 +511,7 @@ async function startOnboardingSession() {
     const metadata = await api('/onboarding');
     onboarding = {invitations_enabled:metadata.invitations_enabled === true, accounts_enabled:metadata.accounts_enabled === true && metadata.account_url === '/account'};
   } catch { /* Runtime metadata must fail closed even when static assets are cached. */ }
+  await window.WaypostI18n.ready;
   $('#request-access').hidden = !onboarding.invitations_enabled;
   $('#account-setup').hidden = !onboarding.accounts_enabled;
   $('#account-setup-app').hidden = !onboarding.accounts_enabled;
