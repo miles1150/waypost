@@ -292,3 +292,23 @@ for (const status of [401,404,403,500]) test(`legacy invitation request handles 
     assert.equal(w.location.hash,'');
   }finally{w.close();}
 });
+
+
+test('Dashboard translates tab headings after dictionary load and language switches', async () => {
+  const {w,d}=await accountDashboard();
+  try {
+    await w.WaypostI18n.ready;
+    for (const lang of ['en','zh','en']) {
+      await w.WaypostI18n.set(lang);
+      const dict=JSON.parse(readFileSync('dashboard/locales/'+lang+'.json','utf8'));
+      for (const tab of ['messages','collections','tokens','inbox']) {
+        const button=d.querySelector('[data-tab='+tab+']');
+        await wait(()=>!button.disabled);
+        button.click();
+        await wait(()=>d.querySelector('#title').textContent===dict['tab.'+tab+'.title']);
+        assert.equal(d.querySelector('#subtitle').textContent,dict['tab.'+tab+'.note']);
+        await wait(()=>!button.disabled);
+      }
+    }
+  } finally {w.close();}
+});
