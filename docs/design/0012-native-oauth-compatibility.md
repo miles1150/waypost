@@ -1,5 +1,7 @@
 # Native OAuth client compatibility
 
+> 本文保留原阶段设计与实验记录。新连接请按[标准 OAuth 接入](../mcp-oauth-setup.md)使用自动注册或客户端元数据文档；下方预注册 Client ID 配置用于历史兼容，不是当前默认步骤。
+
 Local follow-up to `9d79df7`; no deployment or real IdP registration. The plugin task supplied isolated Codex observations and a Claude localhost callback requirement. This task checks the backend and independently exercises installed Codex CLI 0.163.0 against isolated Workerd with a synthetic owner session.
 
 ## Backend contract

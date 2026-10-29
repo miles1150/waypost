@@ -29,6 +29,7 @@ mod mcp;
 mod memory;
 pub mod oauth;
 mod oauth_authorization;
+pub mod oauth_client_registry;
 mod oauth_tokens;
 mod onboarding;
 #[cfg(all(test, feature = "native"))]
@@ -100,7 +101,9 @@ pub struct App<D, O> {
     pub(crate) encryption: Option<encryption::Encryption>,
     pub(crate) oidc: Option<accounts_oidc::OidcConfig>,
     pub(crate) account_signup_limit: usize,
-    pub(crate) oauth: Option<oauth::OAuthConfig>,
+    pub(crate) oauth_discovery: Option<oauth_client_registry::OAuthClientDiscoveryConfig>,
+    pub(crate) oauth_metadata_fetcher:
+        Option<Rc<dyn oauth_client_registry::OAuthClientMetadataFetcher>>,
     pub(crate) invitations_enabled: bool,
     pub(crate) oidc_exchange: Option<Rc<dyn accounts_oidc::OidcCodeExchange>>,
 }
@@ -117,7 +120,8 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             encryption: None,
             oidc: None,
             account_signup_limit: 0,
-            oauth: None,
+            oauth_discovery: None,
+            oauth_metadata_fetcher: None,
             invitations_enabled: true,
             oidc_exchange: None,
             db,
@@ -435,18 +439,19 @@ impl<D: Database, O: ObjectStore> App<D, O> {
     // Both the initial authentication SELECT and final mutation guard use this
     // predicate against token alias t. No separate ownership lookup can go stale.
     fn oauth_authority_guard(&self, now: i64) -> (String, Vec<Sql>) {
-        let Some(config) = &self.oauth else {
+        if !self.oauth_enabled() {
             return ("t.credential_kind='legacy'".into(), vec![]);
-        };
-        let clients = json!(
-            config
-                .clients
-                .iter()
-                .map(|c| &c.client_id)
-                .collect::<Vec<_>>()
+        }
+        let (client_guard, client_args) = self.oauth_client_guard("ofa", now);
+        let mut args = vec![self.oauth_resource().into()];
+        args.extend(client_args);
+        args.push(now.into());
+        (
+            format!(
+                "(t.credential_kind='legacy' OR (t.credential_kind='oauth' AND EXISTS(SELECT 1 FROM oauth_access_tokens oat JOIN oauth_families ofa ON ofa.family_id=oat.family_id JOIN accounts oac ON oac.account_id=ofa.account_id JOIN account_spaces oas ON oas.account_id=ofa.account_id AND oas.space_id=ofa.space_id WHERE oat.token_id=t.token_id AND ofa.space_id=t.space_id AND ofa.actor_id=t.actor_id AND ofa.consumer_id=t.consumer_id AND ofa.scope='waypost' AND ofa.resource=? AND {client_guard} AND ofa.revoked_at IS NULL AND ofa.expires_at>? AND oac.disabled=0 AND c.view='inbox')))"
+            ),
+            args,
         )
-        .to_string();
-        ("(t.credential_kind='legacy' OR (t.credential_kind='oauth' AND EXISTS(SELECT 1 FROM oauth_access_tokens oat JOIN oauth_families ofa ON ofa.family_id=oat.family_id JOIN accounts oac ON oac.account_id=ofa.account_id JOIN account_spaces oas ON oas.account_id=ofa.account_id AND oas.space_id=ofa.space_id WHERE oat.token_id=t.token_id AND ofa.space_id=t.space_id AND ofa.actor_id=t.actor_id AND ofa.consumer_id=t.consumer_id AND ofa.scope='waypost' AND ofa.resource=? AND ofa.client_id IN(SELECT value FROM json_each(?)) AND ofa.revoked_at IS NULL AND ofa.expires_at>? AND oac.disabled=0 AND c.view='inbox')))".into(),vec![self.oauth_resource().into(),clients.into(),now.into()])
     }
     pub(crate) fn authority_guard(&self, p: &Principal) -> (String, Vec<Sql>) {
         if p.owner_authority.is_some() {
@@ -494,7 +499,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         }
         self.current(p).await?;
         Ok(
-            json!({"api_version":"0.1","space_id":p.space_id,"actor_id":p.actor_id,"consumer_id":p.consumer_id,"view_revision":p.view_revision,"default_recipient_id":p.default_recipient_id,"access_model":"space_membership","memory_collections":collections,"memory_collections_has_more":more,"limits":self.limits,"capabilities":{"privacy_filtering":true,"mailbox":true,"receipts":true,"blob_upload":true,"memory_snapshot":true,"memory_delta":true,"webhook_events":false,"oauth":self.oauth.is_some(),"server_export":false}}),
+            json!({"api_version":"0.1","space_id":p.space_id,"actor_id":p.actor_id,"consumer_id":p.consumer_id,"view_revision":p.view_revision,"default_recipient_id":p.default_recipient_id,"access_model":"space_membership","memory_collections":collections,"memory_collections_has_more":more,"limits":self.limits,"capabilities":{"privacy_filtering":true,"mailbox":true,"receipts":true,"blob_upload":true,"memory_snapshot":true,"memory_delta":true,"webhook_events":false,"oauth":self.oauth_enabled(),"server_export":false}}),
         )
     }
     pub(crate) fn sign_cursor(&self, payload: &str) -> Result<String> {

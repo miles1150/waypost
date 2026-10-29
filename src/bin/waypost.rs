@@ -10,7 +10,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() || args.iter().any(|s| s == "--help" || s == "-h") {
         println!(
-            "Waypost\n\n  waypost init [--data ./var]\n  waypost encrypt [--data ./var]\n  waypost serve [--data ./var] [--listen 127.0.0.1:8787]\n\nWAYPOST_ADMIN_SECRET overrides the private admin-secret file.\nWAYPOST_ENCRYPTION_KEYS sets the private JSON encryption keyring.\nWAYPOST_CURSOR_SECRET optionally separates cursor signing from admin rotation.\nWAYPOST_CSRF_SECRET optionally separates browser CSRF signing from admin rotation.\nWAYPOST_OPERATOR_MODE=disabled retires global operator access; requires OIDC and independent cursor/CSRF secrets.\nWAYPOST_PUBLIC_ORIGIN sets the browser Origin / generated HTTP URLs."
+            "Waypost\n\n  waypost init [--data ./var]\n  waypost encrypt [--data ./var]\n  waypost serve [--data ./var] [--listen 127.0.0.1:8787]\n\nWAYPOST_ADMIN_SECRET overrides the private admin-secret file.\nWAYPOST_ENCRYPTION_KEYS sets the private JSON encryption keyring.\nWAYPOST_CURSOR_SECRET optionally separates cursor signing from admin rotation.\nWAYPOST_CSRF_SECRET optionally separates browser CSRF signing from admin rotation.\nWAYPOST_OPERATOR_MODE=disabled retires global operator access; requires OIDC and independent cursor/CSRF secrets.\nWAYPOST_OAUTH_CLIENT_DISCOVERY optionally enables bounded JSON DCR/CIMD configuration.\nWAYPOST_PUBLIC_ORIGIN sets the browser Origin / generated HTTP URLs."
         );
         return Ok(());
     }
@@ -29,6 +29,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             _ => return Err("Unknown option.".into()),
         }
         i += 2;
+    }
+    if std::env::var_os("WAYPOST_OAUTH_CLIENTS_FILE").is_some()
+        || std::env::var_os("WAYPOST_OAUTH_CLIENTS").is_some()
+    {
+        return Err("Legacy OAuth client configuration is no longer loaded. Import existing clients with the offline migration tool, verify the import, remove WAYPOST_OAUTH_CLIENTS_FILE/WAYPOST_OAUTH_CLIENTS, then explicitly configure WAYPOST_OAUTH_CLIENT_DISCOVERY.".into());
     }
     let operator_mode = std::env::var("WAYPOST_OPERATOR_MODE").unwrap_or_else(|_| "enabled".into());
     if !["enabled", "disabled"].contains(&operator_mode.as_str()) {
@@ -174,14 +179,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         app
     };
-    let app = if let Ok(path) = std::env::var("WAYPOST_OAUTH_CLIENTS_FILE") {
-        let metadata = std::fs::symlink_metadata(&path)?;
-        if !metadata.is_file() || metadata.len() > 65536 {
-            return Err("Invalid OAuth client configuration file.".into());
+    let app = if let Ok(raw) = std::env::var("WAYPOST_OAUTH_CLIENT_DISCOVERY") {
+        if raw.len() > 16384 {
+            return Err("OAuth client discovery configuration is too large.".into());
         }
-        let config: waypost::OAuthConfig = serde_json::from_slice(&std::fs::read(path)?)
-            .map_err(|_| "Invalid OAuth client configuration.")?;
-        app.with_oauth(config)?
+        let config: waypost::OAuthClientDiscoveryConfig = serde_json::from_str(&raw)
+            .map_err(|_| "Invalid OAuth client discovery configuration.")?;
+        let fetcher: Option<Rc<dyn waypost::OAuthClientMetadataFetcher>> =
+            if waypost::native::oauth_client_metadata::NativeClientMetadataFetcher::supported_in_environment() {
+                Some(Rc::new(waypost::native::oauth_client_metadata::NativeClientMetadataFetcher))
+            } else {
+                eprintln!("CIMD disabled: the configured proxy prevents DNS-pinned metadata fetching; dynamic registration remains governed by its configuration.");
+                None
+            };
+        app.with_oauth_client_discovery(config, fetcher)?
     } else {
         app
     };

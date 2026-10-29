@@ -75,7 +75,13 @@ fn revoke_queries(selector: &str, args: Vec<Sql>, now: i64) -> Vec<Statement> {
 impl<D: Database, O: ObjectStore> App<D, O> {
     pub(super) async fn oauth_token(&self, p: BTreeMap<String, String>) -> Result<Value> {
         let client = required(&p, "client_id")?;
-        self.oauth_client(client)?;
+        let resolved_client = self.oauth_client(client).await?;
+        if resolved_client.source != "legacy"
+            && p.get("grant_type")
+                .is_some_and(|v| v == "urn:ietf:params:oauth:grant-type:device_code")
+        {
+            return Err(oauth_error("unauthorized_client"));
+        }
         let resource = required(&p, "resource")?;
         if resource != self.oauth_resource() {
             return Err(oauth_error("invalid_target"));
@@ -101,7 +107,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                 opaque(code)?;
                 let challenge = verifier(required(&p, "code_verifier")?)?;
                 let redirect = required(&p, "redirect_uri")?;
-                if !self.oauth_client(client)?.accepts_redirect(redirect) {
+                if !self.oauth_client(client).await?.accepts_redirect(redirect) {
                     return Err(oauth_error("invalid_grant"));
                 }
                 let now = self.clock.now_ms();
@@ -118,7 +124,10 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                 let mut claim = vec![nonce.clone().into()];
                 claim.extend(tuple);
                 claim.push(now.into());
-                queries.push(Statement::new(format!("UPDATE oauth_requests AS q SET status='consumed',claim_nonce=? WHERE kind='code' AND code_digest=? AND client_id=? AND resource=? AND redirect_uri=? AND code_challenge=? AND status='approved' AND expires_at>? AND {LIVE_REQUEST}"),claim));
+                let (client_guard, client_args) = self.oauth_client_guard("q", now);
+                claim.extend(client_args);
+
+                queries.push(Statement::new(format!("UPDATE oauth_requests AS q SET status='consumed',claim_nonce=? WHERE kind='code' AND code_digest=? AND client_id=? AND resource=? AND redirect_uri=? AND code_challenge=? AND status='approved' AND expires_at>? AND {LIVE_REQUEST} AND {client_guard}"),claim));
                 self.issue_request(queries, &nonce, now).await
             }
             "refresh_token" => {
@@ -162,7 +171,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         let token_id = random_id("token")?;
         let access = secret("wpo_")?;
         let refresh = secret("wpr_")?;
-        queries.push(Statement::new("INSERT INTO oauth_families(family_id,client_id,resource,scope,account_id,space_id,actor_id,consumer_id,created_at,expires_at) SELECT ?,client_id,resource,scope,account_id,space_id,actor_id,consumer_id,?,? FROM oauth_requests WHERE claim_nonce=? AND status='consumed'",vec![family.clone().into(),now.into(),(now+FAMILY_MS).into(),nonce.into()]));
+        queries.push(Statement::new("INSERT INTO oauth_families(family_id,client_id,resource,scope,account_id,space_id,actor_id,consumer_id,client_revision,created_at,expires_at) SELECT ?,client_id,resource,scope,account_id,space_id,actor_id,consumer_id,client_revision,?,? FROM oauth_requests WHERE claim_nonce=? AND status='consumed'",vec![family.clone().into(),now.into(),(now+FAMILY_MS).into(),nonce.into()]));
         queries.push(Statement::new("UPDATE oauth_requests SET family_id=? WHERE claim_nonce=? AND status='consumed' AND EXISTS(SELECT 1 FROM oauth_families WHERE family_id=?)",vec![family.clone().into(),nonce.into(),family.clone().into()]));
         queries.push(Statement::new("INSERT INTO tokens(token_id,token_digest,space_id,actor_id,consumer_id,expires_at,created_at,credential_kind) SELECT ?,?,space_id,actor_id,consumer_id,?,?,'oauth' FROM oauth_families WHERE family_id=? RETURNING token_id",vec![token_id.clone().into(),digest(&access),(now+ACCESS_MS).into(),now.into(),family.clone().into()]));
         let result_index = queries.len() - 1;
@@ -186,7 +195,18 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             vec![digest(raw), client.into(), resource.into()],
             now,
         );
-        q.push(Statement::new(format!("UPDATE oauth_refresh_tokens SET used_at=?,redeem_nonce=? WHERE token_digest=? AND used_at IS NULL AND expires_at>? AND EXISTS(SELECT 1 FROM oauth_families f WHERE f.family_id=oauth_refresh_tokens.family_id AND f.client_id=? AND f.resource=? AND {LIVE_FAMILY})"),vec![now.into(),nonce.clone().into(),digest(raw),now.into(),client.into(),resource.into(),now.into()]));
+        let (client_guard, client_args) = self.oauth_client_guard("f", now);
+        let mut refresh_args = vec![
+            now.into(),
+            nonce.clone().into(),
+            digest(raw),
+            now.into(),
+            client.into(),
+            resource.into(),
+            now.into(),
+        ];
+        refresh_args.extend(client_args);
+        q.push(Statement::new(format!("UPDATE oauth_refresh_tokens SET used_at=?,redeem_nonce=? WHERE token_digest=? AND used_at IS NULL AND expires_at>? AND EXISTS(SELECT 1 FROM oauth_families f WHERE f.family_id=oauth_refresh_tokens.family_id AND f.client_id=? AND f.resource=? AND {LIVE_FAMILY} AND {client_guard})"),refresh_args));
         let token_id = random_id("token")?;
         let access = secret("wpo_")?;
         let refresh = secret("wpr_")?;
@@ -232,11 +252,14 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         }
         // Refresh time after awaiting polling and recheck authority inside issuance batch.
         let now = self.clock.now_ms();
+        let (client_guard, client_args) = self.oauth_client_guard("q", now);
+        let mut claim_args = vec![nonce.clone().into(), now.into()];
+        claim_args.extend(client_args);
         let claim = Statement::new(
             format!(
-                "UPDATE oauth_requests AS q SET status='consumed' WHERE claim_nonce=? AND status='approved' AND expires_at>? AND {LIVE_REQUEST}"
+                "UPDATE oauth_requests AS q SET status='consumed' WHERE claim_nonce=? AND status='approved' AND expires_at>? AND {LIVE_REQUEST} AND {client_guard}"
             ),
-            vec![nonce.clone().into(), now.into()],
+            claim_args,
         );
         match self.issue_request(vec![claim], &nonce, now).await {
             Err(error) if error.code == "invalid_grant" => {
@@ -276,7 +299,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
     pub(super) async fn oauth_revoke(&self, p: BTreeMap<String, String>) -> Result<Value> {
         fields(&p, &["client_id", "token", "token_type_hint"])?;
         let client = required(&p, "client_id")?;
-        self.oauth_client(client)?;
+        self.oauth_client(client).await?;
         let raw = required(&p, "token")?;
         // Unknown tokens return the same success; neither discovery nor oracle response.
         if raw.len() > 512 {
@@ -354,22 +377,26 @@ pub(super) mod tests {
             },
         )
         .with_clock(clock.clone());
-        app.oauth = Some(super::super::oauth::OAuthConfig {
-            clients: vec![
-                super::super::oauth::OAuthClient {
-                    client_id: "test".into(),
-                    name: "Test".into(),
-                    redirect_uris: vec!["https://client.example/callback".into()],
-                    allow_loopback_port_variation: false,
-                },
-                super::super::oauth::OAuthClient {
-                    client_id: "other".into(),
-                    name: "Other".into(),
-                    redirect_uris: vec![],
-                    allow_loopback_port_variation: false,
-                },
-            ],
-        });
+        app.oidc=Some(serde_json::from_value(json!({"issuer":"https://fixture.example","client_id":"test","authorization_endpoint":"https://fixture.example/authorize","token_endpoint":"https://fixture.example/token","keys":[]})).unwrap());
+        app = app
+            .import_legacy_oauth_clients(super::super::oauth::OAuthConfig {
+                clients: vec![
+                    super::super::oauth::OAuthClient {
+                        client_id: "test".into(),
+                        name: "Test".into(),
+                        redirect_uris: vec!["https://client.example/callback".into()],
+                        allow_loopback_port_variation: false,
+                    },
+                    super::super::oauth::OAuthClient {
+                        client_id: "other".into(),
+                        name: "Other".into(),
+                        redirect_uris: vec![],
+                        allow_loopback_port_variation: false,
+                    },
+                ],
+            })
+            .await
+            .unwrap();
         let response = app
             .handle(Request::json(
                 "POST",
@@ -735,7 +762,7 @@ pub(super) mod tests {
             json!({}),
         );
         let principal = app.authenticate(&request).await.unwrap();
-        app.oauth = None;
+        app.oauth_discovery = None;
         assert!(app.authenticate(&request).await.is_err());
         assert!(app.current(&principal).await.is_err());
     }
@@ -753,8 +780,8 @@ pub(super) mod tests {
     }
     #[tokio::test(flavor = "current_thread")]
     async fn removed_redirect_cannot_exchange_already_approved_code() {
-        let (_dir, mut app, _clock) = fixture().await;
-        app.oauth.as_mut().unwrap().clients[0].redirect_uris.clear();
+        let (_dir, app, _clock) = fixture().await;
+        app.db.batch(vec![Statement::new("UPDATE oauth_dynamic_clients SET metadata_json=json_set(metadata_json,'$.redirect_uris',json('[]')) WHERE client_id='test'",vec![])]).await.unwrap();
         assert_eq!(
             app.oauth_token(code_params()).await.unwrap_err().code,
             "invalid_grant"

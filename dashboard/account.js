@@ -33,13 +33,31 @@ async function oauthApi(path, body, method = 'POST') {
   if (!response.ok || value.error) throw new Error('OAuth request failed. Sign in again if your session is older than 15 minutes, then review the request.');
   return value;
 }
+function renderOAuthReview(target, info, browser = false) {
+  const sources = {dcr:'Dynamic registration (client-supplied metadata)',cimd:'URL metadata document (client-supplied metadata)',legacy:'Migrated / administrator-configured client'};
+  const lines = [
+    `Client name (unverified): ${info.client_name || 'Not supplied'}`,
+    `Client ID: ${info.client_id || 'Not supplied'}`,
+    `Client source: ${sources[info.client_source] || 'Unknown — not verified'}`,
+  ];
+  if (browser) {
+    let redirect;
+    try {redirect = new URL(info.redirect_uri);} catch (_) {throw new Error('Cannot review the actual redirect destination. Restart authorization.');}
+    if (!['http:','https:'].includes(redirect.protocol) || redirect.username || redirect.password) throw new Error('Invalid authorization redirect destination.');
+    lines.push(`Actual redirect host: ${redirect.host}`, `Actual redirect URI: ${redirect.href}`);
+    if (['127.0.0.1','[::1]','localhost'].includes(redirect.hostname)) lines.push('Loopback callback: returns to software on this computer. Approve only if you just started this connection in your own client.');
+    else lines.push('The authorization response returns to this host. Check the hostname independently; the client name is not proof of ownership.');
+  } else lines.push('Device authorization: no browser callback. Verify the code came from your own client.');
+  lines.push(`Resource: ${info.resource || 'Not supplied'}`, `Scope: ${info.scope || 'Not supplied'}`, `Selected Space: ${info.selected_space_id || 'None'}`, info.warning || 'Approval grants access to the selected Space, not account management.');
+  target.textContent = lines.join('\n');
+}
 async function reviewOAuth() {
   oauthPreview = false; el('oauth-approve').disabled = true; el('oauth-deny').disabled = true;
   if (!oauthRequest) return;
   const requestId = oauthRequest, revision = ++oauthRevision;
   const info = await oauthApi('/oauth/consent?request_id='+encodeURIComponent(oauthRequest), null, 'GET');
   if (oauthRequest !== requestId || oauthRevision !== revision) return;
-  el('oauth-info').textContent = JSON.stringify(info, null, 2);
+  renderOAuthReview(el('oauth-info'), info, true);
   oauthPreview = true; el('oauth-approve').disabled = false; el('oauth-deny').disabled = false;
 }
 function clearOAuthHint() {
@@ -122,7 +140,7 @@ for (const decision of ['approve','deny']) el('oauth-'+decision).onclick = () =>
   if (!oauthPreview || !oauthRequest) throw new Error('Review the request first.');
   const requestId = oauthRequest; resetOAuthConsent();
   const result = await oauthApi('/oauth/consent', {request_id:requestId,decision, ...(decision==='approve'?{actor_id:el('actor-id').value,consumer_id:el('consumer-id').value}:{})});
-  // The server returns only the exact pre-registered destination after binding checks.
+  // The server returns only the exact registered destination after binding checks.
   const target = new URL(result.redirect_uri);
   if (!['https:','http:'].includes(target.protocol)) throw new Error('Invalid authorization redirect.');
   clearOAuthHint(); location.assign(target.href);
@@ -133,7 +151,7 @@ el('oauth-device-inspect').onclick = () => run(async () => {
   const code = el('oauth-device-code').value, revision = oauthRevision;
   const info = await oauthApi('/oauth/device_consent',{action:'inspect',user_code:code});
   if (code !== el('oauth-device-code').value || revision !== oauthRevision) return;
-  el('oauth-device-info').textContent = JSON.stringify(info,null,2);
+  renderOAuthReview(el('oauth-device-info'), info);
   oauthDeviceCode=code; el('oauth-device-approve').disabled=false; el('oauth-device-deny').disabled=false;
 });
 for (const action of ['approve','deny']) el('oauth-device-'+action).onclick = () => run(async () => {

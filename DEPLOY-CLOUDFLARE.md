@@ -4,6 +4,8 @@ Waypost runs as a Rust Worker (`wasm32-unknown-unknown`, `worker` 0.8.7) with me
 
 Do not commit `wrangler.production.toml`, `.env.production`, or `.dev.vars`.
 
+For account-enabled deployments, follow the [OAuth client migration guide](docs/oauth-client-migration.md) before this version switch: migration 0015 is additive, legacy public clients require verified offline import, and the new runtime rejects `WAYPOST_OAUTH_CLIENTS`/`WAYPOST_OAUTH_CLIENTS_FILE`. Explicit `WAYPOST_OAUTH_CLIENT_DISCOVERY` enables generic DCR; Worker CIMD is not advertised without a safe egress implementation. Preserve the old version and its configuration for rollback. These instructions do not mean production has been migrated or client login has been verified.
+
 ## Why this path
 
 The domain core talks to a `Database` and an `ObjectStore`. The `cloudflare` feature implements those with D1 batches and R2. MCP is one JSON-RPC POST per call, so the Worker request model is enough. There is no server-side task loop and no WebSocket session.
@@ -15,7 +17,7 @@ Cloudflare Containers can run the native binary, but they require the Workers Pa
 - Dashboard, admin session, CSRF, invitations, and access requests
 - HTTP API and stateless MCP at `POST /mcp` (initialize, tools/list, tools/call)
 - Mailbox, receipts, memory, and encrypted blobs inside the Worker limits below
-- `GET /health`, and `GET /ready` with the admin bearer (checks the ten migrations and an R2 read)
+- `GET /health`, and `GET /ready` with the admin bearer (checks the registered migrations and an R2 read)
 - Per-IP rate limits from the bindings in the Wrangler config
 
 Verified locally with Wrangler 4.111.0, Workerd, local D1/R2, the official MCP SDK client, and `scripts/verify_deployment.py`. This repo does not deploy to a live account from CI.
@@ -33,7 +35,7 @@ Verified locally with Wrangler 4.111.0, Workerd, local D1/R2, the official MCP S
 
 `waypost_describe` returns the live values. Production must set `WAYPOST_ENCRYPTION_KEYS`. With encryption on, blob bytes are buffered, checked, and stored as ciphertext. The unencrypted streaming upload/download path is only for local development.
 
-These are the same on every deployment, including Cloudflare: no MCP SSE session, no WebSocket, no OAuth, no webhooks, no server-side full export, no cron. `waypost encrypt` migrates a local SQLite directory only. On a Worker, plaintext migration is `POST /admin/v0/maintenance/encrypt` (see [docs/security.md](docs/security.md)). D1 and R2 are not one transaction. Worker rollback does not roll back D1 or R2. Rate-limit counts are approximate and per Cloudflare location.
+These are the same on every deployment, including Cloudflare: no MCP SSE session, no WebSocket, no server-pushed webhooks, no server-side full export, no cron. Account/OIDC and MCP OAuth are optional and require explicit configuration; see the [OAuth setup](docs/mcp-oauth-setup.md) and [migration guide](docs/oauth-client-migration.md). `waypost encrypt` migrates a local SQLite directory only. On a Worker, plaintext migration is `POST /admin/v0/maintenance/encrypt` (see [docs/security.md](docs/security.md)). D1 and R2 are not one transaction. Worker rollback does not roll back D1 or R2. Rate-limit counts are approximate and per Cloudflare location.
 
 ## Plan
 

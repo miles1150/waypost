@@ -48,7 +48,9 @@ Waypost 是中立的开源基础设施。助手在自己的运行环境里执行
 
 ## 账号与插件预览（未启用）
 
-源码已实现[个人账号与设备配对预览](docs/design/0009-personal-accounts.md)及[本地插件原型](plugins/waypost/README.md)。需要运行者显式配置 OIDC，默认关闭；现有邀请和密钥继续有效。自定义设备配对与另行启用的[标准 MCP OAuth 预注册客户端方案](docs/design/0010-mcp-oauth.md)分开；真实身份提供方和宿主安装尚需验收。
+源码已实现[个人账号与设备配对预览](docs/design/0009-personal-accounts.md)及[本地插件原型](plugins/waypost/README.md)。需要运行者显式配置 OIDC，默认关闭；现有邀请和密钥继续有效。自定义设备配对与另行启用的[标准 MCP OAuth 自动接入](docs/mcp-oauth-setup.md)分开；真实身份提供方和宿主安装尚需验收。
+
+已有手工 OAuth 客户端配置的运行者请先读[客户端迁移指南](docs/oauth-client-migration.md)：新版拒绝旧客户端列表运行变量，必须先导入并核对；源码更新不代表生产已经启用自动注册。
 
 Google 登录配置与公钥刷新见[Google OIDC 准备](docs/design/0015-google-oidc.md)，尚未在生产启用。
 

@@ -365,12 +365,49 @@ fn log_and_error(route: &str, error: Error) -> worker::Result<worker::Response> 
 
 fn log_json_error(route: &str, body: &[u8]) {
     let parsed = serde_json::from_slice::<Value>(body).ok();
-    let code = parsed
-        .as_ref()
-        .and_then(|value| value.get("error"))
-        .and_then(|error| error.get("code"))
-        .and_then(Value::as_str)
-        .unwrap_or("INTERNAL_ERROR");
+    // Protocol error envelopes differ from Waypost's object-shaped errors. Map
+    // only known wire codes to static log labels; never emit descriptions, RPC
+    // messages, arbitrary OAuth strings, or the raw response body.
+    let code = parsed.as_ref().map_or("INTERNAL_ERROR", |value| {
+        let Some(error) = value.get("error") else {
+            return "INTERNAL_ERROR";
+        };
+        if let Some(code) = error.as_str() {
+            return match code {
+                "invalid_request" => "INVALID_REQUEST",
+                "invalid_client" => "INVALID_CLIENT",
+                "invalid_client_metadata" => "INVALID_CLIENT_METADATA",
+                "invalid_redirect_uri" => "INVALID_REDIRECT_URI",
+                "invalid_grant" => "INVALID_GRANT",
+                "invalid_scope" => "INVALID_SCOPE",
+                "invalid_target" => "INVALID_TARGET",
+                "unauthorized_client" => "UNAUTHORIZED_CLIENT",
+                "unsupported_grant_type" => "UNSUPPORTED_GRANT_TYPE",
+                "unsupported_response_type" => "UNSUPPORTED_RESPONSE_TYPE",
+                "authorization_pending" => "AUTHORIZATION_PENDING",
+                "slow_down" => "SLOW_DOWN",
+                "expired_token" => "EXPIRED_TOKEN",
+                "access_denied" => "ACCESS_DENIED",
+                "temporarily_unavailable" => "TEMPORARILY_UNAVAILABLE",
+                "server_error" => "SERVER_ERROR",
+                _ => "INTERNAL_ERROR",
+            };
+        }
+        if value.get("jsonrpc").and_then(Value::as_str) == Some("2.0") {
+            return match error.get("code").and_then(Value::as_i64) {
+                Some(-32001) => "UNAUTHENTICATED",
+                Some(-32700) => "PARSE_ERROR",
+                Some(-32600) => "INVALID_REQUEST",
+                Some(-32601) => "METHOD_NOT_FOUND",
+                Some(-32602) => "INVALID_PARAMS",
+                _ => "INTERNAL_ERROR",
+            };
+        }
+        error
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or("INTERNAL_ERROR")
+    });
     let request_id = parsed
         .as_ref()
         .and_then(|value| value.get("request_id"))
@@ -422,6 +459,14 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
     let production = env
         .var("DEPLOYMENT_ENV")
         .is_ok_and(|value| value.to_string() == "production");
+    if env.var("WAYPOST_OAUTH_CLIENTS").is_ok() || env.var("WAYPOST_OAUTH_CLIENTS_FILE").is_ok() {
+        return log_and_error(
+            &route_name,
+            Error::internal(
+                "legacy OAuth clients require offline import and removal of old configuration",
+            ),
+        );
+    }
     let operator_mode = env
         .var("WAYPOST_OPERATOR_MODE")
         .map(|v| v.to_string())
@@ -463,10 +508,11 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
     }
     let path = raw.path();
     let route = crate::http::classify(raw.method().as_ref(), &path);
-    let limiter = if matches!(route, crate::http::Route::AdminSession)
-        && raw.method() == worker::Method::Post
-        && path != "/account/devices/token"
-        && path != "/oauth/token"
+    let limiter = if (path == "/oauth/register" && raw.method() == worker::Method::Post)
+        || (matches!(route, crate::http::Route::AdminSession)
+            && raw.method() == worker::Method::Post
+            && path != "/account/devices/token"
+            && path != "/oauth/token")
     {
         admin_limiter.ok()
     } else if matches!(
@@ -539,13 +585,21 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
     } else {
         app
     };
-    let app = if let Ok(raw) = env.var("WAYPOST_OAUTH_CLIENTS") {
-        let configured = serde_json::from_str::<crate::OAuthConfig>(&raw.to_string())
-            .map_err(|_| Error::internal("OAuth configuration"))
-            .and_then(|config| app.with_oauth(config));
+    let app = if let Ok(raw) = env.var("WAYPOST_OAUTH_CLIENT_DISCOVERY") {
+        let configured =
+            serde_json::from_str::<crate::OAuthClientDiscoveryConfig>(&raw.to_string())
+                .map_err(|_| Error::internal("OAuth client discovery configuration"))
+                // Workers Fetch cannot pin the validated DNS answers in this runtime.
+                // Do not substitute an unsafe DNS preflight; DCR needs no outbound fetch.
+                .and_then(|config| app.with_oauth_client_discovery(config, None));
         match configured {
             Ok(app) => app,
-            Err(_) => return log_and_error(&route_name, Error::internal("OAuth configuration")),
+            Err(_) => {
+                return log_and_error(
+                    &route_name,
+                    Error::internal("OAuth client discovery configuration"),
+                );
+            }
         }
     } else {
         app

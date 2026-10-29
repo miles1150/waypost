@@ -9,7 +9,7 @@ function fixture(url='https://example.test/account', hint=null){
  if(hint) dom.window.sessionStorage.setItem('waypost.oauth.request',hint);
  dom.window.fetch=async(path,options)=>{
   calls.push({path,options});
-  if(path.startsWith('/oauth/')) return {ok:true,json:async()=>({request_id:'oauth_test',client_name:'<img onerror=alert(1)>',scope:'waypost',selected_space_id:'s',approved:true})};
+  if(path.startsWith('/oauth/')) return {ok:true,json:async()=>({request_id:'oauth_test',client_name:'<img onerror=alert(1)>',client_source:'dcr',redirect_uri:'http://127.0.0.1:8765/callback',scope:'waypost',selected_space_id:'s',approved:true})};
   if(['/account/connections/list','/account/oauth/list','/account/identities/list'].includes(path)) {
    const items=path.includes('/connections/')?[{token_id:'legacy',actor_id:'actor',consumer_id:'consumer',credential_kind:'legacy',revoked_at:null}]:path.includes('/oauth/')?[{family_id:'family',client_id:'client',revoked_at:null}]:[{actor_id:'actor',consumer_id:'consumer',kind:'agent',display_name:'<img onerror=alert(1)>',disabled:false}];
    return {ok:true,json:async()=>({ok:true,data:{space_id:'s',items,has_more:false,primary_actor_id:null,primary_revision:3}})};
@@ -121,4 +121,37 @@ test('dashboard entry requires an explicitly selected owned Space and uses accou
     assert.equal(doc.getElementById('open-dashboard').getAttribute('href'),'/dashboard?auth=account');
     assert.match(doc.getElementById('open-dashboard').textContent,/Chosen Space/);
   } finally {dom.window.close();}
+});
+
+test('OAuth consent distinguishes client metadata from actual callback and warns about loopback',async()=>{
+ const {dom,doc}=fixture('https://example.test/account','oauth_test');
+ try {
+  await wait();
+  const text=doc.getElementById('oauth-info').textContent;
+  assert.match(text,/Client name \(unverified\): <img/);
+  assert.match(text,/Dynamic registration/);
+  assert.match(text,/Actual redirect host: 127\.0\.0\.1:8765/);
+  assert.match(text,/Loopback callback/);
+  assert.equal(doc.querySelector('#oauth-info img'),null);
+  for(const [source,label] of [['cimd','URL metadata document'],['legacy','Migrated / administrator-configured client']]) {
+   dom.window.fetch=async()=>({ok:true,json:async()=>({client_name:'Trusted-looking <script>client</script>',client_id:'https://metadata.example/client.json',client_source:source,redirect_uri:'https://actual-callback.example/return',selected_space_id:'s'})});
+   doc.getElementById('oauth-inspect').click();await wait();
+   const review=doc.getElementById('oauth-info').textContent;
+   assert(review.includes(label));assert(review.includes('Actual redirect host: actual-callback.example'));
+   assert(!review.includes('Loopback callback'));assert.equal(doc.querySelector('#oauth-info script'),null);
+  }
+ }finally{dom.window.close();}
+});
+
+test('OAuth consent cannot approve when actual callback is missing or invalid',async()=>{
+ const {dom,doc}=fixture('https://example.test/account','oauth_test');
+ try {
+  await wait();
+  for(const redirect_uri of [undefined,'javascript:alert(1)','https://user:password@callback.example/']) {
+   dom.window.fetch=async()=>({ok:true,json:async()=>({client_name:'Example',client_source:'dcr',redirect_uri})});
+   doc.getElementById('oauth-inspect').click();await wait();
+   assert.equal(doc.getElementById('oauth-approve').disabled,true);
+   assert.match(doc.getElementById('status').textContent,/redirect/);
+  }
+ }finally{dom.window.close();}
 });
