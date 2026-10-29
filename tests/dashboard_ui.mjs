@@ -272,3 +272,23 @@ test('account mode pins session, registry, inspection, binary reads and logout r
     assert.equal(d.querySelector('#login-form').hidden,true);
   } finally {dom.window.close();}
 });
+
+for (const status of [401,404,403,500]) test(`legacy invitation request handles session ${status} without masking other failures`,async()=>{
+  const dom = new JSDOM(readFileSync('dashboard/index.html','utf8'),{url:'https://service.example/dashboard#request-access',runScripts:'outside-only'}),w=dom.window,d=w.document;
+  w.HTMLDialogElement.prototype.close=function(){this.open=false;};
+  w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
+  w.fetch=async(path)=>{
+    if(path.includes('/locales/'))return {ok:true,status:200,json:async()=>JSON.parse(readFileSync('dashboard/locales/'+path.split('/').pop(),'utf8'))};
+    if(path==='/onboarding')return {ok:true,status:200,json:async()=>({ok:true,data:{invitations_enabled:true,accounts_enabled:false}})};
+    assert.equal(path,'/admin/session');
+    return {ok:false,status,json:async()=>({ok:false,error:{message:'Session failure '+status}})};
+  };
+  try {
+    w.eval(readFileSync('dashboard/i18n.js','utf8'));
+    w.eval(readFileSync('dashboard/app.js','utf8'));
+    await wait(()=>[401,404].includes(status)?d.querySelector('#detail').open:d.querySelector('#login-error').textContent==='Session failure '+status);
+    assert.equal(d.querySelector('#detail').open,[401,404].includes(status));
+    assert.equal(d.querySelector('#login').hidden,false);
+    assert.equal(w.location.hash,'');
+  }finally{w.close();}
+});

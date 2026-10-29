@@ -76,7 +76,7 @@ async function resumeSession(requesting = false) {
   catch (error) {
     showLogin();
     notice(accountMode && [401,403].includes(error.status) ? t('login.accountSessionRequired') : error.message);
-    if (!accountMode && requesting && error.status === 401) $('#request-access').click();
+    if (!accountMode && requesting && [401,404].includes(error.status)) $('#request-access').click();
     return;
   }
   try {await entered(session);}
