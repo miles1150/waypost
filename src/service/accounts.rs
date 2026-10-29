@@ -1354,6 +1354,11 @@ mod tests {
     async fn owner_subject_blocks_first_signup_by_another_verified_identity() {
         let (_d, app, exchange, _) = fixture().await;
         let app = app.with_account_owner_subject("owner-subject").unwrap();
+        assert!(
+            app.account_session(&request(&app, "/account/session", json!({})), false)
+                .await
+                .is_err()
+        );
         let count_before = app
             .db
             .query(Statement::new("SELECT count(*) AS n FROM accounts", vec![]))
