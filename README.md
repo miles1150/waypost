@@ -54,6 +54,8 @@ Google 登录配置与公钥刷新见[Google OIDC 准备](docs/design/0015-googl
 
 [邀请制受控退役](docs/design/0014-invitation-retirement.md)提供 `WAYPOST_ONBOARDING_MODE=accounts`，默认不启用；须先验证真实账号登录与恢复。切换保留历史及旧客户端，不能据本地测试宣称线上已取消邀请。
 
+[账号自主管理与运营者退役方案](docs/design/0016-operator-retirement.md)提供默认兼容的禁用路径；生产切换、旧空间认领和既有凭据撤销需分别验收，不能仅凭代码合并视为完成。
+
 ## 开源与产品关系
 
 Waypost 使用 [Apache 2.0](LICENSE) 许可证，自行运行免软件许可费，服务器和存储资源由你承担。也可以申请我们维护的托管服务，目前通过邀请试用，后续服务与收费方案尚未确定。

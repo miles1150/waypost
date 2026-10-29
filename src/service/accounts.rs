@@ -276,6 +276,20 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         } else {
             crate::json::parse(&r.body, self.limits.max_json_bytes)?
         };
+        if [
+            "/account/connections/",
+            "/account/oauth/",
+            "/account/identities/",
+            "/account/primary/",
+        ]
+        .iter()
+        .any(|prefix| r.path.starts_with(prefix))
+        {
+            return Ok(Response::json(
+                200,
+                json!({"ok":true,"data":self.account_management_action(r,body).await?}),
+            ));
+        }
         if r.path.starts_with("/account/devices/") {
             return Ok(Response::json(
                 200,

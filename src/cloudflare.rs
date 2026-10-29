@@ -422,13 +422,26 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
     let production = env
         .var("DEPLOYMENT_ENV")
         .is_ok_and(|value| value.to_string() == "production");
+    let operator_mode = env
+        .var("WAYPOST_OPERATOR_MODE")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|_| "enabled".into());
+    if !["enabled", "disabled"].contains(&operator_mode.as_str()) {
+        return log_and_error(&route_name, Error::internal("operator configuration"));
+    }
     let config = Config {
-        admin_secret: env.secret("WAYPOST_ADMIN_SECRET")?.to_string(),
+        admin_secret: if operator_mode == "disabled" {
+            env.secret("WAYPOST_ADMIN_SECRET")
+                .map(|v| v.to_string())
+                .unwrap_or_default()
+        } else {
+            env.secret("WAYPOST_ADMIN_SECRET")?.to_string()
+        },
         public_origin: env.var("PUBLIC_ORIGIN")?.to_string(),
     };
     let origin = worker::Url::parse(&config.public_origin)
         .map_err(|_| worker::Error::from("Invalid public origin"))?;
-    if config.admin_secret.len() < 32
+    if (operator_mode != "disabled" && config.admin_secret.len() < 32)
         || !matches!(origin.scheme(), "http" | "https")
         || origin.origin().ascii_serialization() != config.public_origin
         || (production && origin.scheme() != "https")
@@ -558,6 +571,23 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
     } else {
         app
     };
+    let app = if let Ok(secret) = env.secret("WAYPOST_CSRF_SECRET") {
+        match app.with_csrf_secret(&secret.to_string()) {
+            Ok(app) => app,
+            Err(_) => {
+                return log_and_error(
+                    &route_name,
+                    Error::internal("worker CSRF key configuration"),
+                );
+            }
+        }
+    } else {
+        app
+    };
+    let app = match app.with_operator_mode(&operator_mode) {
+        Ok(app) => app,
+        Err(_) => return log_and_error(&route_name, Error::internal("operator configuration")),
+    };
     let app = if let Ok(keys) = env.secret("WAYPOST_ENCRYPTION_KEYS") {
         let legacy = env
             .var("ALLOW_LEGACY_PLAINTEXT")
@@ -579,6 +609,9 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
     } else {
         app
     };
+    if app.validate_runtime_auth().is_err() {
+        return log_and_error(&route_name, Error::internal("operator configuration"));
+    }
     let mut request = Request {
         method: raw.method().to_string(),
         path: raw.path(),
@@ -588,7 +621,8 @@ async fn handle_fetch(mut raw: worker::Request, env: Env) -> worker::Result<work
     };
     if request.path == "/ready" && request.method == "GET" {
         let readiness: Result<Value> = async {
-            app.admin_auth(&request)?;
+            if app.operator_enabled { app.admin_auth(&request)?; }
+            else { app.admin_access(&request).await?; }
             let migrations=crate::storage::migrations::MIGRATIONS;
             let placeholders=vec!["?";migrations.len()].join(",");
             let rows=app.db.query(Statement::new(format!("SELECT count(*) AS applied FROM d1_migrations WHERE name IN ({placeholders})"),migrations.iter().map(|(name,_)|Sql::from(*name)).collect())).await?;

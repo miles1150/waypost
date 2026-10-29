@@ -30,7 +30,9 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         }
         let authority = if request.headers.contains_key("authorization") {
             let digest = Sha256::digest(bearer(request)?.as_bytes()).to_vec();
-            if digest == Sha256::digest(self.config.admin_secret.as_bytes()).to_vec() {
+            if self.operator_enabled
+                && digest == Sha256::digest(self.config.admin_secret.as_bytes()).to_vec()
+            {
                 OwnerAuthority::Operator
             } else {
                 OwnerAuthority::Credential(digest)
@@ -82,8 +84,14 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             p.view_revision.into(),
         ];
         let owner: String = match p.owner_authority.as_ref().expect("owner authority checked") {
-            OwnerAuthority::Operator => "1=1".into(),
+            OwnerAuthority::Operator => if self.operator_enabled { "1=1" } else { "1=0" }.into(),
             OwnerAuthority::Credential(digest) => {
+                if !self.operator_enabled
+                    && !self.config.admin_secret.is_empty()
+                    && digest == &Sha256::digest(self.config.admin_secret.as_bytes()).to_vec()
+                {
+                    return ("1=0".into(), vec![]);
+                }
                 args.extend([p.space_id.clone().into(), digest.clone().into()]);
                 "EXISTS(SELECT 1 FROM space_admin_credentials oc WHERE oc.space_id=? AND oc.credential_digest=? AND oc.revoked_at IS NULL)".into()
             }
@@ -99,12 +107,17 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                 args.extend([
                     digest.clone().into(),
                     self.clock.now_ms().into(),
+                    (self.operator_enabled || self.config.admin_secret.is_empty()).into(),
+                    Sha256::digest(self.config.admin_secret.as_bytes())
+                        .to_vec()
+                        .into(),
+                    self.operator_enabled.into(),
                     Sha256::digest(self.config.admin_secret.as_bytes())
                         .to_vec()
                         .into(),
                     p.space_id.clone().into(),
                 ]);
-                "EXISTS(SELECT 1 FROM admin_sessions os WHERE os.session_digest=? AND os.expires_at>? AND ((os.space_id IS NULL AND os.admin_fingerprint=?) OR (os.space_id=? AND EXISTS(SELECT 1 FROM space_admin_credentials oc WHERE oc.space_id=os.space_id AND oc.credential_digest=os.admin_fingerprint AND oc.revoked_at IS NULL))))".into()
+                "EXISTS(SELECT 1 FROM admin_sessions os WHERE os.session_digest=? AND os.expires_at>? AND (? OR os.admin_fingerprint<>?) AND ((? AND os.space_id IS NULL AND os.admin_fingerprint=?) OR (os.space_id=? AND EXISTS(SELECT 1 FROM space_admin_credentials oc WHERE oc.space_id=os.space_id AND oc.credential_digest=os.admin_fingerprint AND oc.revoked_at IS NULL))))".into()
             }
         };
         (
