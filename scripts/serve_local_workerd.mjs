@@ -32,7 +32,7 @@ const bindings={PUBLIC_ORIGIN:origin,WAYPOST_PRODUCT:product,WAYPOST_ACCOUNT_SIG
 if(product==='keys')Object.assign(bindings,{KEYS_OWNER_SUBJECT:'fixture',WAYPOST_OPERATOR_MODE:'disabled',WAYPOST_CSRF_SECRET:randomBytes(32).toString('hex'),WAYPOST_CURSOR_SECRET:randomBytes(32).toString('hex'),KEYS_DATA_KEYS:JSON.stringify({active:'k1',keys:{k1:randomBytes(32).toString('hex')}})});
 else Object.assign(bindings,{WAYPOST_ADMIN_SECRET:'local-only-admin-secret-32-bytes-long',WAYPOST_ENCRYPTION_KEYS:JSON.stringify({active:'w1',keys:{w1:randomBytes(32).toString('hex')}})});
 const mf=new Miniflare({modules:true,scriptPath:root+'build/index.js',modulesRules:[{type:'CompiledWasm',include:['**/*.wasm'],fallthrough:true}],compatibilityDate:'2026-07-17',
-  log:new Log(LogLevel.WARN),host:'127.0.0.1',port,d1Databases:{DB:'local-'+product},r2Buckets:['OBJECTS'],bindings,
+  log:new Log(LogLevel.WARN),host:'127.0.0.1',port,d1Databases:{DB:'local-'+product},bindings,
   outboundService:() => { throw new Error('External network is disabled in local acceptance.'); }});
 await mf.ready;
 const db=await mf.getD1Database('DB');
