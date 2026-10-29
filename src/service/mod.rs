@@ -101,6 +101,8 @@ pub struct App<D, O> {
     pub(crate) encryption: Option<encryption::Encryption>,
     pub(crate) oidc: Option<accounts_oidc::OidcConfig>,
     pub(crate) account_signup_limit: usize,
+    /// Optional exact OIDC subject restriction for single-owner products.
+    pub(crate) account_owner_subject: Option<String>,
     pub(crate) oauth_discovery: Option<oauth_client_registry::OAuthClientDiscoveryConfig>,
     pub(crate) oauth_metadata_fetcher:
         Option<Rc<dyn oauth_client_registry::OAuthClientMetadataFetcher>>,
@@ -120,6 +122,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             encryption: None,
             oidc: None,
             account_signup_limit: 0,
+            account_owner_subject: None,
             oauth_discovery: None,
             oauth_metadata_fetcher: None,
             invitations_enabled: true,

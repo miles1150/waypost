@@ -73,6 +73,22 @@ fn oauth_detach_statements(event: &str, now: i64) -> Vec<Statement> {
 }
 
 impl<D: Database, O: ObjectStore> App<D, O> {
+    /// Restrict browser sign-in to a preconfigured subject of the verified OIDC issuer.
+    /// This does not revoke pre-existing agent credentials; products must fence their
+    /// own grant checks and use a fresh database or separately migrate old grants.
+    pub fn with_account_owner_subject(mut self, subject: &str) -> Result<Self> {
+        if self.oidc.is_none()
+            || subject.is_empty()
+            || subject.len() > 255
+            || subject.chars().any(char::is_control)
+        {
+            return Err(Error::invalid(
+                "An account owner requires a valid OIDC subject.",
+            ));
+        }
+        self.account_owner_subject = Some(subject.to_owned());
+        Ok(self)
+    }
     /// Explicit opt-in; never reads caller-supplied identity headers. Zero disables signup.
     pub fn with_accounts(
         mut self,
@@ -120,7 +136,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                 return Err(Error::forbidden());
             }
         }
-        let rows = self.db.query(Statement::new("SELECT s.* FROM account_sessions s JOIN accounts a ON a.account_id=s.account_id WHERE s.session_digest=? AND s.expires_at>? AND a.disabled=0",vec![digest(&raw),self.clock.now_ms().into()])).await?;
+        let rows = self.db.query(Statement::new("SELECT s.* FROM account_sessions s JOIN accounts a ON a.account_id=s.account_id WHERE s.session_digest=? AND s.expires_at>? AND a.disabled=0 AND (? IS NULL OR (a.issuer=? AND a.subject=?))",vec![digest(&raw),self.clock.now_ms().into(),self.account_owner_subject.clone().into(),self.oidc.as_ref().map(|c| c.issuer.clone()).into(),self.account_owner_subject.clone().into()])).await?;
         rows.first().cloned().ok_or_else(Error::unauthenticated)
     }
     pub(super) async fn account_handle(&self, r: &Request) -> Response {
@@ -211,6 +227,13 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                         .as_ref(),
                 )
                 .await?;
+            if self
+                .account_owner_subject
+                .as_ref()
+                .is_some_and(|owner| owner != &identity.subject)
+            {
+                return Err(Error::forbidden());
+            }
             let now = self.clock.now_ms();
             let aid = random_id("account")?;
             let session = secret()?;
@@ -1328,8 +1351,52 @@ mod tests {
         );
     }
     #[tokio::test(flavor = "current_thread")]
+    async fn owner_subject_blocks_first_signup_by_another_verified_identity() {
+        let (_d, app, exchange, _) = fixture().await;
+        let app = app.with_account_owner_subject("owner-subject").unwrap();
+        let count_before = app
+            .db
+            .query(Statement::new("SELECT count(*) AS n FROM accounts", vec![]))
+            .await
+            .unwrap();
+        let start = action(&app, "/account/login", json!({})).await;
+        let value: Value = serde_json::from_slice(&start.body).unwrap();
+        let url = url::Url::parse(value["data"]["authorization_url"].as_str().unwrap()).unwrap();
+        let params: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
+        let now = app.clock.now_ms() / 1000;
+        let header = URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&json!({"alg":"RS256","kid":"test"})).unwrap());
+        let claims = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&json!({"iss":"https://issuer.example","aud":"test-client","sub":"other-subject","nonce":params["nonce"],"iat":now,"exp":now+300})).unwrap());
+        let message = format!("{header}.{claims}");
+        let signature = rsa::pkcs1v15::SigningKey::<Sha256>::new(key()).sign(message.as_bytes());
+        *exchange.0.borrow_mut() =
+            format!("{message}.{}", URL_SAFE_NO_PAD.encode(signature.to_bytes()));
+        let mut callback = Request::json("GET", "/account/callback", "", json!({}));
+        callback.headers.remove("authorization");
+        callback.query = format!("state={}&code=synthetic-code", params["state"]);
+        callback.headers.insert(
+            "cookie".into(),
+            start.headers["set-cookie"]
+                .split(';')
+                .next()
+                .unwrap()
+                .into(),
+        );
+        assert_eq!(app.handle(callback).await.status, 403);
+        let count_after = app
+            .db
+            .query(Statement::new("SELECT count(*) AS n FROM accounts", vec![]))
+            .await
+            .unwrap();
+        assert_eq!(
+            integer(&count_before[0], "n").unwrap(),
+            integer(&count_after[0], "n").unwrap()
+        );
+    }
+    #[tokio::test(flavor = "current_thread")]
     async fn browser_code_flow_binds_state_nonce_and_consumes_callback_once() {
-        let (_d, mut app, exchange, _) = fixture().await;
+        let (_d, app, exchange, _) = fixture().await;
+        let mut app = app.with_account_owner_subject("new-subject").unwrap();
         app.config.public_origin = "https://waypost.example".into();
         let start = action(&app, "/account/login", json!({})).await;
         assert_eq!(start.status, 200);
