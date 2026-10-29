@@ -644,6 +644,33 @@ fn id_token(bytes: &[u8]) -> Result<String> {
     }
     Ok(token.to_owned())
 }
+
+// Map untrusted provider responses to fixed, non-sensitive OAuth categories.
+// Never emit error_description or any other response data.
+#[cfg(any(test, all(not(feature = "native"), feature = "cloudflare")))]
+fn oauth_error_category(bytes: &[u8]) -> &'static str {
+    match serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_owned))
+        .as_deref()
+    {
+        Some("invalid_client") => "invalid_client",
+        Some("invalid_grant") => "invalid_grant",
+        Some("invalid_request") => "invalid_request",
+        Some("unauthorized_client") => "unauthorized_client",
+        Some("unsupported_grant_type") => "unsupported_grant_type",
+        Some("invalid_scope") => "invalid_scope",
+        _ => "other",
+    }
+}
+
+#[cfg(all(not(feature = "native"), feature = "cloudflare"))]
+fn log_exchange_failure(reason: &'static str, status: Option<u16>) {
+    // `reason` is supplied only by fixed literals or oauth_error_category.
+    let line = serde_json::json!({"event":"account_token_exchange_failure","reason":reason,"http_status":status});
+    worker::console_error!("{}", line);
+}
+
 impl OidcCodeExchange for OidcHttpExchange {
     fn google_jwks(&self) -> Pin<Box<dyn Future<Output = Result<GoogleJwksResponse>> + '_>> {
         Box::pin(self.fetch_google_keys(GOOGLE_JWKS_URL))
@@ -705,9 +732,13 @@ impl OidcCodeExchange for OidcHttpExchange {
                     let mut response = worker::Fetch::Request(request)
                         .send_with_signal(&signal)
                         .await
-                        .map_err(|_| rejected())?;
-                    if response.status_code() != 200 {
-                        return Err(rejected());
+                        .map_err(|_| {
+                            log_exchange_failure("network", None);
+                            rejected()
+                        })?;
+                    let status = response.status_code();
+                    if status != 200 {
+                        log_exchange_failure("http_response", Some(status));
                     }
                     let mut stream = response.stream().map_err(|_| rejected())?;
                     let mut bytes = Vec::new();
@@ -718,6 +749,10 @@ impl OidcCodeExchange for OidcHttpExchange {
                         }
                         bytes.extend_from_slice(&chunk);
                     }
+                    if status != 200 {
+                        log_exchange_failure(oauth_error_category(&bytes), Some(status));
+                        return Err(rejected());
+                    }
                     id_token(&bytes)
                 };
                 let result = match select(
@@ -727,7 +762,10 @@ impl OidcCodeExchange for OidcHttpExchange {
                 .await
                 {
                     Either::Left((result, _)) => result,
-                    Either::Right(_) => Err(rejected()),
+                    Either::Right(_) => {
+                        log_exchange_failure("timeout", None);
+                        Err(rejected())
+                    }
                 };
                 drop(abort_guard);
                 result
@@ -921,6 +959,26 @@ mod transport_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn provider_errors_are_strictly_allowlisted() {
+        use super::oauth_error_category;
+        assert_eq!(
+            oauth_error_category(br#"{"error":"invalid_client","error_description":"sensitive"}"#),
+            "invalid_client"
+        );
+        assert_eq!(
+            oauth_error_category(br#"{"error":"invalid_grant"}"#),
+            "invalid_grant"
+        );
+        assert_eq!(
+            oauth_error_category(br#"{"error":"secret-value"}"#),
+            "other"
+        );
+        assert_eq!(
+            oauth_error_category(b"malformed sensitive response"),
+            "other"
+        );
+    }
     use super::*;
     use rsa::{
         RsaPrivateKey,
