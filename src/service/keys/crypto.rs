@@ -159,7 +159,12 @@ mod tests {
         let tampered = Sealed {
             kid: "k1".into(),
             nonce: sealed.nonce.clone(),
-            ciphertext: format!("A{}", &sealed.ciphertext[1..]),
+            // Flip one decoded byte so the tamper never coincides with the original.
+            ciphertext: {
+                let mut bytes = URL_SAFE_NO_PAD.decode(&sealed.ciphertext).unwrap();
+                bytes[0] ^= 1;
+                URL_SAFE_NO_PAD.encode(bytes)
+            },
         };
         assert!(old.open("acct", "entry", "TOKEN", &tampered).is_err());
         // Rotation: k2 is active for new writes, k1 still opens old rows.
