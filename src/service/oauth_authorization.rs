@@ -87,13 +87,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         if resource != self.oauth_resource() {
             return Err(oauth_error("invalid_target"));
         }
-        let scope = params
-            .get("scope")
-            .cloned()
-            .unwrap_or_else(|| "waypost".into());
-        if scope != "waypost" {
-            return Err(oauth_error("invalid_scope"));
-        }
+        let scope = self.normalize_scope(params.get("scope").map(String::as_str))?;
         Ok((resource, scope))
     }
     pub(super) async fn oauth_authorize(
@@ -242,7 +236,9 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         if client.revision != integer(row, "client_revision")? {
             return Err(oauth_error("invalid_client"));
         }
-        if text(row, "resource")? != self.oauth_resource() || text(row, "scope")? != "waypost" {
+        if text(row, "resource")? != self.oauth_resource()
+            || self.normalize_scope(Some(&text(row, "scope")?)).is_err()
+        {
             return Err(oauth_error("invalid_target"));
         }
         if text(row, "kind")? == "code" && !client.accepts_redirect(&text(row, "redirect_uri")?) {
@@ -257,7 +253,16 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         }
         fields(
             &body,
-            if writing {
+            if writing && self.keys.is_some() {
+                &[
+                    "request_id",
+                    "decision",
+                    "can_create",
+                    "all_read",
+                    "all_write",
+                    "entries",
+                ]
+            } else if writing {
                 &["request_id", "decision", "actor_id", "consumer_id"]
             } else {
                 &["request_id"]
@@ -271,6 +276,32 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         let rows=self.db.query(Statement::new("SELECT * FROM oauth_requests WHERE request_id=? AND kind='code' AND browser_digest=? AND status='pending' AND expires_at>?",vec![id.clone().into(),digest(&browser),now.into()])).await?;
         let row = rows.first().ok_or_else(|| oauth_error("invalid_request"))?;
         let client_name = self.current_authorization_client(row).await?;
+        if !writing && self.keys.is_some() {
+            let redirect = text(row, "redirect_uri")?;
+            let redirect_host = url::Url::parse(&redirect)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_owned))
+                .unwrap_or_default();
+            let client_id = text(row, "client_id")?;
+            let kind = match client_name.source.as_str() {
+                "cimd" => "metadata_document",
+                "dcr" => "dynamic_registration",
+                _ => "preregistered",
+            };
+            let host = url::Url::parse(&client_id)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_owned))
+                .unwrap_or_default();
+            let warning = if kind == "dynamic_registration" {
+                "This client name is not verified."
+            } else {
+                "Local callbacks may be impersonated by another process."
+            };
+            return Ok(Response::json(
+                200,
+                json!({"request_id":id,"client_id":client_id,"client_name":client_name.name,"client_kind":kind,"client_host":host,"redirect_host":redirect_host,"resource":text(row,"resource")?,"scope":text(row,"scope")?,"client_warnings":[warning],"vault":self.keys_consent_view(&session).await?,"warning":"Selected secrets are returned to the connected agent."}),
+            ));
+        }
         if !writing {
             return Ok(Response::json(
                 200,
@@ -373,6 +404,16 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         let active = "EXISTS(SELECT 1 FROM account_sessions s JOIN accounts a ON a.account_id=s.account_id WHERE s.session_digest=? AND s.account_id=? AND s.expires_at>? AND s.created_at>=? AND a.disabled=0)";
         let (client_guard, client_args) = self.oauth_client_guard("oauth_requests", now);
 
+        if self.keys.is_some() {
+            if let (Some(code), Some(browser)) = (code, browser_args.first()) {
+                return self
+                    .keys_commit_consent(id, &account, &cookie, code, browser.clone(), body, now)
+                    .await;
+            }
+            if code.is_some() {
+                return Err(oauth_error("invalid_request"));
+            }
+        }
         if let Some(code) = code {
             let sid = optional_text(session, "selected_space_id")
                 .ok_or_else(|| oauth_error("access_denied"))?;

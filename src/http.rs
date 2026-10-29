@@ -76,33 +76,50 @@ pub(crate) fn classify<'a>(method: &str, path: &'a str) -> Route<'a> {
 
 #[cfg(any(test, all(feature = "cloudflare", target_arch = "wasm32")))]
 const ROUTE_WORDS: &[&str] = &[
+    ".well-known",
     "access-request",
     "access-requests",
+    "account",
     "actors",
     "admin",
+    "app.css",
+    "app.js",
     "audit",
+    "authorize",
     "blobs",
+    "callback",
     "cleanup",
+    "clients",
     "collections",
     "commit",
     "connection-status",
+    "consent",
     "consumers",
     "content",
     "dashboard",
     "describe",
+    "device_authorization",
+    "device_consent",
     "disable",
     "edit",
     "encrypt",
+    "grants",
     "health",
     "inbox",
     "inspect",
     "invitation",
     "invitations",
+    "keyenv-remote.json",
+    "keys",
     "locales",
+    "login",
     "maintenance",
     "mcp",
     "memory",
     "messages",
+    "oauth",
+    "oauth-authorization-server",
+    "oauth-protected-resource",
     "owner-credential",
     "prepare",
     "preview",
@@ -111,12 +128,15 @@ const ROUTE_WORDS: &[&str] = &[
     "read",
     "ready",
     "receipts",
+    "register",
     "registry",
     "revisions",
+    "revoke",
     "session",
     "spaces",
     "status",
     "submissions",
+    "token",
     "tokens",
     "uploads",
     "v0",
@@ -244,5 +264,18 @@ mod tests {
         assert!(!hidden.contains("secret"));
         assert_eq!(route_label("TRACE", "/health"), "UNKNOWN /health");
         assert_eq!(route_label("GET", "/not-a-route"), "GET /:id");
+        for (method, path) in [
+            ("POST", "/oauth/register"),
+            ("GET", "/oauth/clients/keyenv-remote.json"),
+            ("GET", "/.well-known/oauth-protected-resource/mcp"),
+            ("POST", "/account/keys/grants/revoke"),
+        ] {
+            assert_eq!(route_label(method, path), format!("{method} {path}"));
+        }
+        // Keys entry names never appear in paths; anything unexpected is masked.
+        assert_eq!(
+            route_label("GET", "/account/keys/github-token"),
+            "GET /account/keys/:id"
+        );
     }
 }

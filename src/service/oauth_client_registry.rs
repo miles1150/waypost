@@ -97,12 +97,19 @@ fn responses() -> Vec<String> {
 fn scope() -> String {
     "waypost".into()
 }
-fn metadata(bytes: &[u8], id: Option<&str>) -> Result<Metadata> {
+fn metadata(bytes: &[u8], id: Option<&str>, keys: bool) -> Result<Metadata> {
     if bytes.len() > 16384 {
         return Err(oauth_error("invalid_client_metadata"));
     }
-    let m: Metadata =
+    let mut m: Metadata =
         serde_json::from_slice(bytes).map_err(|_| oauth_error("invalid_client_metadata"))?;
+    if keys {
+        let raw: Value =
+            serde_json::from_slice(bytes).map_err(|_| oauth_error("invalid_client_metadata"))?;
+        if raw.get("scope").is_none() {
+            m.scope = "keys:read keys:write".into();
+        }
+    }
     if m.client_id.as_deref() != id
         || m.client_name.is_empty()
         || m.client_name.len() > 200
@@ -114,7 +121,11 @@ fn metadata(bytes: &[u8], id: Option<&str>) -> Result<Metadata> {
         || m.grant_types.iter().any(|v| !grants().contains(v))
         || m.grant_types.len() != 2
         || !m.grant_types.iter().any(|v| v == "refresh_token")
-        || m.scope != "waypost"
+        || if keys {
+            m.scope != "keys:read" && m.scope != "keys:write" && m.scope != "keys:read keys:write"
+        } else {
+            m.scope != "waypost"
+        }
         || m.application_type
             .as_ref()
             .is_some_and(|v| v != "native" && v != "web")
@@ -281,7 +292,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         if document.max_age_seconds == 0 {
             return Err(oauth_error("invalid_client"));
         }
-        let m = metadata(&document.body, Some(id))?;
+        let m = metadata(&document.body, Some(id), self.keys.is_some())?;
         let raw = serde_json::to_string(&m).map_err(|_| Error::storage())?;
         let fp = hex::encode(Sha256::digest(raw.as_bytes()));
         let now = self.clock.now_ms();
@@ -309,7 +320,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
     }
     fn unreferenced_client_cleanup(now: i64, keep_id: &str) -> Statement {
         Statement::new(
-            "DELETE FROM oauth_dynamic_clients WHERE disabled=0 AND ((source='dcr' AND created_at<?) OR (source='cimd' AND valid_until<=?)) AND NOT EXISTS(SELECT 1 FROM oauth_requests q WHERE q.client_id=oauth_dynamic_clients.client_id AND q.status IN('pending','approved') AND q.expires_at>?) AND NOT EXISTS(SELECT 1 FROM oauth_families f WHERE f.client_id=oauth_dynamic_clients.client_id) AND client_id<>?",
+            "DELETE FROM oauth_dynamic_clients WHERE disabled=0 AND ((source='dcr' AND created_at<?) OR (source='cimd' AND valid_until<=?)) AND NOT EXISTS(SELECT 1 FROM oauth_requests q WHERE q.client_id=oauth_dynamic_clients.client_id AND q.status IN('pending','approved') AND q.expires_at>?) AND NOT EXISTS(SELECT 1 FROM oauth_families f WHERE f.client_id=oauth_dynamic_clients.client_id) AND NOT EXISTS(SELECT 1 FROM key_oauth_families k WHERE k.client_id=oauth_dynamic_clients.client_id) AND client_id<>?",
             vec![
                 (now - 86_400_000).into(),
                 now.into(),
@@ -333,7 +344,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         {
             return Err(oauth_error("invalid_request"));
         }
-        let mut m = metadata(&r.body, None)?;
+        let mut m = metadata(&r.body, None, self.keys.is_some())?;
         self.reserve_client_budget("dcr").await?;
         let id = random_id("dcr")?;
         m.client_id = Some(id.clone());

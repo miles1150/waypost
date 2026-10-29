@@ -23,6 +23,7 @@ mod dashboard;
 mod dashboard_memory;
 mod encryption;
 mod invitations;
+mod keys;
 mod mailbox;
 mod maintenance;
 mod mcp;
@@ -103,6 +104,7 @@ pub struct App<D, O> {
     pub(crate) account_signup_limit: usize,
     /// Optional exact OIDC subject restriction for single-owner products.
     pub(crate) account_owner_subject: Option<String>,
+    pub(crate) keys: Option<keys::KeysConfig>,
     pub(crate) oauth_discovery: Option<oauth_client_registry::OAuthClientDiscoveryConfig>,
     pub(crate) oauth_metadata_fetcher:
         Option<Rc<dyn oauth_client_registry::OAuthClientMetadataFetcher>>,
@@ -123,6 +125,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             oidc: None,
             account_signup_limit: 0,
             account_owner_subject: None,
+            keys: None,
             oauth_discovery: None,
             oauth_metadata_fetcher: None,
             invitations_enabled: true,
@@ -224,6 +227,9 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         self
     }
     pub async fn handle(&self, request: Request) -> Response {
+        if self.keys.is_some() {
+            return self.keys_handle(request).await;
+        }
         if request.path == "/onboarding" && request.method == "GET" {
             return Response::json(
                 200,

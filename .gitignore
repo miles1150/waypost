@@ -28,3 +28,4 @@ __pycache__/
 
 # Website deployment metadata stays local
 /website/.vercel/
+/wrangler.keys.production.toml

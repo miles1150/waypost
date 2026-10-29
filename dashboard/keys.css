@@ -1,0 +1,12 @@
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+body { margin: 0; padding: 16px; background: Canvas; color: CanvasText; }
+main { max-width: 760px; margin: 0 auto; }
+table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid color-mix(in srgb, CanvasText 20%, transparent); }
+fieldset { margin: 12px 0; }
+fieldset label { display: block; margin: 4px 0; }
+.warnings li { color: #b45309; }
+.note { font-size: 0.9em; opacity: 0.8; }
+button { margin-right: 8px; padding: 6px 14px; }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; }
+dd { margin: 0; overflow-wrap: anywhere; }

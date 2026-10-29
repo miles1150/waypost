@@ -94,38 +94,47 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let origin =
         std::env::var("WAYPOST_PUBLIC_ORIGIN").unwrap_or_else(|_| format!("http://{address}"));
-    let keyring = match std::env::var("WAYPOST_ENCRYPTION_KEYS") {
-        Ok(value) => zeroize::Zeroizing::new(value),
-        Err(_) => {
-            let path = data.join("encryption-keys");
-            if !path.exists() {
-                if operator_disabled {
-                    return Err("Disabled operator never generates secrets; configure or restore the encryption keyring.".into());
-                }
-                if data.join("metadata.sqlite").exists() {
-                    return Err("Encryption keyring is missing. Restore encryption-keys, or explicitly configure WAYPOST_ENCRYPTION_KEYS for legacy migration.".into());
-                }
-                use std::io::Write;
-                let mut bytes = zeroize::Zeroizing::new([0u8; 32]);
-                getrandom::getrandom(bytes.as_mut())
-                    .map_err(|_| "Unable to generate encryption key.")?;
-                let mut options = std::fs::OpenOptions::new();
-                options.write(true).create_new(true);
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::OpenOptionsExt;
-                    options.mode(0o600);
-                }
-                match options.open(&path) {
-                    Ok(mut file) => {
-                        file.write_all(serde_json::json!({"active":"v1","keys":{"v1":hex::encode(bytes.as_ref())}}).to_string().as_bytes())?;
-                        file.sync_all()?;
+    let product = std::env::var("WAYPOST_PRODUCT").unwrap_or_else(|_| "waypost".into());
+    if !["waypost", "keys"].contains(&product.as_str()) {
+        return Err("WAYPOST_PRODUCT must be waypost or keys.".into());
+    }
+    let keys_product = product == "keys";
+    let keyring = if keys_product {
+        zeroize::Zeroizing::new(String::new())
+    } else {
+        match std::env::var("WAYPOST_ENCRYPTION_KEYS") {
+            Ok(value) => zeroize::Zeroizing::new(value),
+            Err(_) => {
+                let path = data.join("encryption-keys");
+                if !path.exists() {
+                    if operator_disabled {
+                        return Err("Disabled operator never generates secrets; configure or restore the encryption keyring.".into());
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-                    Err(e) => return Err(e.into()),
+                    if data.join("metadata.sqlite").exists() {
+                        return Err("Encryption keyring is missing. Restore encryption-keys, or explicitly configure WAYPOST_ENCRYPTION_KEYS for legacy migration.".into());
+                    }
+                    use std::io::Write;
+                    let mut bytes = zeroize::Zeroizing::new([0u8; 32]);
+                    getrandom::getrandom(bytes.as_mut())
+                        .map_err(|_| "Unable to generate encryption key.")?;
+                    let mut options = std::fs::OpenOptions::new();
+                    options.write(true).create_new(true);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::OpenOptionsExt;
+                        options.mode(0o600);
+                    }
+                    match options.open(&path) {
+                        Ok(mut file) => {
+                            file.write_all(serde_json::json!({"active":"v1","keys":{"v1":hex::encode(bytes.as_ref())}}).to_string().as_bytes())?;
+                            file.sync_all()?;
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                        Err(e) => return Err(e.into()),
+                    }
                 }
+                zeroize::Zeroizing::new(std::fs::read_to_string(path)?)
             }
-            zeroize::Zeroizing::new(std::fs::read_to_string(path)?)
         }
     };
     let migration_admin = secret.clone();
@@ -155,7 +164,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         app
     };
     let allow_legacy = std::env::var("WAYPOST_ALLOW_LEGACY_PLAINTEXT").is_ok_and(|v| v == "1");
-    let app = app.with_encryption_keys(&keyring, allow_legacy)?;
+    let app = if keys_product {
+        app
+    } else {
+        app.with_encryption_keys(&keyring, allow_legacy)?
+    };
     let app = if let Ok(path) = std::env::var("WAYPOST_OIDC_CONFIG_FILE") {
         let metadata = std::fs::symlink_metadata(&path)?;
         if !metadata.is_file() || metadata.len() > 65536 {
@@ -200,6 +213,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         &std::env::var("WAYPOST_ONBOARDING_MODE").unwrap_or_else(|_| "legacy".into()),
     )?;
     let app = app.with_operator_mode(&operator_mode)?;
+    let app = if keys_product {
+        let owner = std::env::var("KEYS_OWNER_SUBJECT")?;
+        let keys = zeroize::Zeroizing::new(std::env::var("KEYS_DATA_KEYS")?);
+        app.with_account_owner_subject(&owner)?.with_keys(&keys)?
+    } else {
+        app
+    };
     let app = Rc::new(app);
     if command == "init" {
         if operator_disabled {
