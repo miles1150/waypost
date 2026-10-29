@@ -200,8 +200,18 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                     &format!("{}/account/callback", self.config.public_origin),
                 )
                 .await?;
+            let identity = config
+                .verify_current(
+                    &token,
+                    &text(row, "nonce")?,
+                    self.clock.as_ref(),
+                    self.oidc_exchange
+                        .as_ref()
+                        .ok_or_else(Error::not_found)?
+                        .as_ref(),
+                )
+                .await?;
             let now = self.clock.now_ms();
-            let identity = config.verify(&token, &text(row, "nonce")?, now)?;
             let aid = random_id("account")?;
             let session = secret()?;
             let expiry = now + 8 * 60 * 60 * 1000;
@@ -634,6 +644,7 @@ mod tests {
             authorization_endpoint: "https://issuer.example/authorize".into(),
             token_endpoint: "https://issuer.example/token".into(),
             client_secret: None,
+            google_jwks: false,
             keys: vec![OidcRsaKey {
                 kid: "test".into(),
                 n: URL_SAFE_NO_PAD.encode(k.n().to_bytes_be()),
