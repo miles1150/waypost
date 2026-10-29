@@ -153,7 +153,8 @@ try {
   const invalidWrites={...invalidAccount,origin,'x-waypost-csrf':legacyOwner.csrf_token};
   assert.equal((await response('/admin/v0/registry',{method:'POST',body:{kind:'spaces'},headers:invalidWrites})).status,403);
   assert.equal((await response('/admin/v0/spaces/space_a/memory/collection_dashboard/read',{method:'POST',body:{},headers:invalidWrites})).status,403);
-  assert.equal((await response('/admin/session',{headers:{'x-waypost-auth':'account',authorization:'Bearer '+ownerKey}})).status,401);
+  const conflictingBearer=await response('/admin/session',{headers:{'x-waypost-auth':'account',authorization:'Bearer '+ownerKey}});
+  assert.equal(conflictingBearer.status,400);assert.equal(conflictingBearer.value.error.code,'INVALID_ARGUMENT');
   for(const headers of [{...explicitAccountHeaders,origin},{...explicitAccountHeaders,origin,'x-waypost-csrf':'wrong'}])assert.equal((await response('/admin/v0/registry',{method:'POST',body:{kind:'spaces'},headers})).status,403);
   assert.equal((await response('/admin/v0/spaces/space_other/inspect',{method:'POST',body:{kind:'inbox'},headers:explicitWrites})).status,404);
   phase='selected space connection scope';
