@@ -4,6 +4,37 @@ use crate::json::{fields, required};
 use crate::storage::driver::optional_text;
 use accounts_oidc::{OidcCodeExchange, OidcConfig};
 
+// Static labels only: never log callback parameters, cookies, provider responses,
+// errors, or identity claims. Cloudflare associates each line with the request.
+#[derive(Clone, Copy)]
+enum CallbackFailure {
+    Parameters,
+    BrowserCookie,
+    State,
+    TokenExchange,
+    IdToken,
+}
+impl CallbackFailure {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Parameters => "parameters",
+            Self::BrowserCookie => "browser_cookie",
+            Self::State => "state",
+            Self::TokenExchange => "token_exchange",
+            Self::IdToken => "id_token",
+        }
+    }
+    fn record(self) {
+        #[cfg(all(not(feature = "native"), feature = "cloudflare"))]
+        worker::console_error!(
+            "{{\"event\":\"account_callback_failure\",\"stage\":\"{}\"}}",
+            self.label()
+        );
+        #[cfg(any(feature = "native", not(feature = "cloudflare")))]
+        let _ = self.label();
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum BrowserCookie {
     Account,
@@ -174,22 +205,28 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                     return Err(Error::invalid("Repeated callback parameter."));
                 }
             }
-            let state = params.get("state").ok_or_else(Error::unauthenticated)?;
-            let code = params.get("code").ok_or_else(Error::unauthenticated)?;
+            let missing = || {
+                CallbackFailure::Parameters.record();
+                Error::unauthenticated()
+            };
+            let state = params.get("state").ok_or_else(missing)?;
+            let code = params.get("code").ok_or_else(missing)?;
             if state.len() != 43 || code.len() > 4096 {
+                CallbackFailure::Parameters.record();
                 return Err(Error::unauthenticated());
             }
             let browser = cookie(
                 r,
                 browser_cookie_name(&self.config.public_origin, BrowserCookie::Login),
-            )?;
+            )
+            .inspect_err(|_| CallbackFailure::BrowserCookie.record())?;
             // Claim before network exchange. A lost/failed exchange requires a fresh login,
             // never a replay of a possibly consumed authorization code.
             let rows = self.db.batch(vec![Statement::new("UPDATE account_login_attempts SET consumed=1 WHERE state_digest=? AND browser_digest=? AND expires_at>? AND consumed=0 RETURNING nonce,verifier",vec![digest(state),digest(&browser),now.into()])]).await?;
-            let row = rows
-                .first()
-                .and_then(|r| r.first())
-                .ok_or_else(Error::unauthenticated)?;
+            let row = rows.first().and_then(|r| r.first()).ok_or_else(|| {
+                CallbackFailure::State.record();
+                Error::unauthenticated()
+            })?;
             let token = self
                 .oidc_exchange
                 .as_ref()
@@ -199,7 +236,8 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                     &text(row, "verifier")?,
                     &format!("{}/account/callback", self.config.public_origin),
                 )
-                .await?;
+                .await
+                .inspect_err(|_| CallbackFailure::TokenExchange.record())?;
             let identity = config
                 .verify_current(
                     &token,
@@ -210,7 +248,8 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                         .ok_or_else(Error::not_found)?
                         .as_ref(),
                 )
-                .await?;
+                .await
+                .inspect_err(|_| CallbackFailure::IdToken.record())?;
             let now = self.clock.now_ms();
             let aid = random_id("account")?;
             let session = secret()?;
