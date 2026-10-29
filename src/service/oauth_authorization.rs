@@ -292,14 +292,16 @@ impl<D: Database, O: ObjectStore> App<D, O> {
                 .ok()
                 .and_then(|u| u.host_str().map(str::to_owned))
                 .unwrap_or_default();
-            let warning = if kind == "dynamic_registration" {
-                "This client name is not verified."
-            } else {
-                "Local callbacks may be impersonated by another process."
-            };
+            let mut warnings = Vec::new();
+            if kind == "dynamic_registration" {
+                warnings.push("This client name is not verified.");
+            }
+            if matches!(redirect_host.as_str(), "127.0.0.1" | "[::1]" | "localhost") {
+                warnings.push("Local callbacks may be impersonated by another process.");
+            }
             return Ok(Response::json(
                 200,
-                json!({"request_id":id,"client_id":client_id,"client_name":client_name.name,"client_kind":kind,"client_host":host,"redirect_host":redirect_host,"resource":text(row,"resource")?,"scope":text(row,"scope")?,"client_warnings":[warning],"vault":self.keys_consent_view(&session).await?,"warning":"Selected secrets are returned to the connected agent."}),
+                json!({"request_id":id,"client_id":client_id,"client_name":client_name.name,"client_kind":kind,"client_host":host,"redirect_host":redirect_host,"resource":text(row,"resource")?,"scope":text(row,"scope")?,"client_warnings":warnings,"vault":self.keys_consent_view(&session).await?,"warning":"Selected secrets are returned to the connected agent."}),
             ));
         }
         if !writing {

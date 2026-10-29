@@ -1270,6 +1270,27 @@ async fn registration_cleanup_preserves_clients_with_keys_grant_history() {
     let response = f.app.handle(register.clone()).await;
     assert_eq!(response.status, 201);
     let id = body(&response)["client_id"].as_str().unwrap().to_owned();
+    let (request_id, browser) = f
+        .started(&id, "http://127.0.0.1:4444/callback", "keys:read")
+        .await;
+    let preview = body(
+        &f.app
+            .handle(f.browser(
+                "GET",
+                "/oauth/consent",
+                &format!("request_id={request_id}"),
+                &browser,
+                None,
+            ))
+            .await,
+    );
+    let warnings = preview["client_warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 2);
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.as_str().unwrap().contains("impersonated"))
+    );
     let token = f
         .token(
             &id,
