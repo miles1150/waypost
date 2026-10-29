@@ -209,3 +209,66 @@ for (const mode of ['retired','unavailable']) for (const hash of ['#invite=priva
     }finally{release();w.close();}
   });
 }
+
+async function accountDashboard(failure, accountMode = true) {
+  const dom = new JSDOM(readFileSync('dashboard/index.html','utf8'), {url:'https://service.example/dashboard'+(accountMode?'?auth=account':''),runScripts:'outside-only'});
+  const w = dom.window, calls = [];
+  w.HTMLDialogElement.prototype.close = function() {this.open = false;};
+  w.fetch = async(path, options = {}) => {
+    calls.push({path,options});
+    if(path.includes('/locales/')) return {ok:true,status:200,json:async()=>JSON.parse(readFileSync('dashboard/locales/'+path.split('/').pop(),'utf8'))};
+    const body = options.body ? JSON.parse(options.body) : {};
+    let status = 200, data = {};
+    if(path === '/onboarding') data = {accounts_enabled:true,account_url:'/account'};
+    else if(path === '/admin/session') {data = {csrf_token:'account-csrf',operator:false,account_id:'account'}; if(failure === 'session403') status=403; if(failure === 'session401') status=401;}
+    else if(path === '/admin/v0/registry') {data = {items:fixtures[body.kind] || [],has_more:false}; if(failure === 'registry500') status=500;}
+    else if(path.endsWith('/primary-assistant')) data = {revision:0,primary_assistant:null};
+    else data = {items:[],has_more:false};
+    return {ok:status===200,status,json:async()=>({ok:status===200,data,error:{message:'Distinct service failure'}}),arrayBuffer:async()=>new ArrayBuffer(0)};
+  };
+  w.eval(readFileSync('dashboard/i18n.js','utf8')); w.eval(readFileSync('dashboard/app.js','utf8')+'\nwindow.testReadBytes = readBytes;');
+  await wait(()=>calls.some(call=>call.path==='/admin/session'));
+  await new Promise(resolve=>setTimeout(resolve,20));
+  return {dom,w,d:w.document,calls};
+}
+
+test('explicit account session failures offer account selection without a key or credential fallback',async()=>{
+  for(const failure of ['session401','session403']) {
+    const {dom,d,calls}=await accountDashboard(failure);
+    try {
+      assert.equal(d.querySelector('#login-form').hidden,true);
+      assert.equal(d.querySelector('#login .fine').hidden,true);
+      assert.equal(d.querySelector('#account-setup').hidden,false);
+      assert.equal(d.querySelector('#account-setup').getAttribute('href'),'/account');
+      assert.match(d.querySelector('#login-error').textContent,/select a Space/);
+      d.querySelector('#secret').value='must-not-send';
+      d.querySelector('#login-form').dispatchEvent(new dom.window.Event('submit',{cancelable:true}));
+      assert.equal(d.querySelector('#secret').value,'');
+      assert.equal(calls.filter(c=>c.path==='/admin/session').length,1);
+      assert.equal(calls.find(c=>c.path==='/admin/session').options.headers['x-waypost-auth'],'account');
+    } finally {dom.window.close();}
+  }
+});
+
+test('authenticated data failures preserve dashboard and report actual error in both modes',async()=>{
+  for (const mode of [true,false]) {
+  const {dom,d}=await accountDashboard('registry500',mode);
+  try {
+    assert.equal(d.querySelector('#app').hidden,false);
+    assert.equal(d.querySelector('#login').hidden,true);
+    assert.equal(d.querySelector('#notice').textContent,'Distinct service failure');
+  } finally {dom.window.close();}
+  }
+});
+
+test('account mode pins session, registry, inspection, binary reads and logout requests',async()=>{
+  const {dom,w,d,calls}=await accountDashboard();
+  try {
+    await w.testReadBytes('/admin/v0/spaces/space-one/blobs/blob-one/content');
+    d.querySelector('#logout').click();
+    await wait(()=>calls.some(c=>c.path==='/admin/session' && c.options.method==='DELETE') && !d.querySelector('#login').hidden && !d.querySelector('#logout').disabled);
+    for(const call of calls.filter(c=>c.path.startsWith('/admin/'))) assert.equal(call.options.headers['x-waypost-auth'],'account',call.path);
+    assert.equal(d.querySelector('a.brand').getAttribute('href'),'/dashboard?auth=account');
+    assert.equal(d.querySelector('#login-form').hidden,true);
+  } finally {dom.window.close();}
+});

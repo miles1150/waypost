@@ -1,5 +1,7 @@
 'use strict';
 const $ = selector => document.querySelector(selector);
+const accountMode = new URLSearchParams(location.search).get('auth') === 'account';
+const authHeaders = () => accountMode ? {'x-waypost-auth':'account'} : {};
 let csrf = '', spaces = [], actors = [], sid = '', tab = 'inbox', cursor = null, loadEpoch = 0, authEpoch = 0, pageSize = 20, operator = false, primaryState = {revision: 0, primary_assistant: null};
 let onboarding = {invitations_enabled:false, accounts_enabled:false};
 let reportHistory = [];
@@ -42,7 +44,7 @@ async function busy(node, action) {node.disabled = true; try {notice(''); await 
 async function api(path, method = 'GET', body) {
   if (!onboarding.invitations_enabled && (/^\/admin\/(access-request|invitation)$/.test(path) || path.includes('/invitations') || path === '/admin/v0/access-requests')) throw new Error(t('login.onboardingUnavailable'));
   const generation = authEpoch;
-  const response = await fetch(path, {method, credentials: 'same-origin', headers: {'content-type': 'application/json', 'x-waypost-csrf': csrf}, body: body === undefined ? undefined : JSON.stringify(body)});
+  const response = await fetch(path, {method, credentials: 'same-origin', headers: {'content-type': 'application/json', 'x-waypost-csrf': csrf, ...authHeaders()}, body: body === undefined ? undefined : JSON.stringify(body)});
   const result = await response.json();
   if (generation !== authEpoch) throw new Error(t('err.session'));
   if (!response.ok || !result.ok) {if (response.status === 401) showLogin(); throw Object.assign(new Error(result.error?.message || `HTTP ${response.status}`), {code:result.error?.code,status:response.status,details:result.error?.details});}
@@ -50,14 +52,37 @@ async function api(path, method = 'GET', body) {
 }
 async function readBytes(path) {
   const generation = authEpoch;
-  const response = await fetch(path, {credentials:'same-origin'});
+  const response = await fetch(path, {credentials:'same-origin', headers:authHeaders()});
   if (generation !== authEpoch) throw new Error(t('err.sessionShort'));
   if (!response.ok) {if (response.status === 401) showLogin(); throw new Error(t('err.readBlob'));}
   const bytes = new Uint8Array(await response.arrayBuffer());
   if (generation !== authEpoch) throw new Error(t('err.sessionShort'));
   return bytes;
 }
-function showLogin() {authEpoch++; loadEpoch++; stopUpdates(); reportHistory = []; inboxHead = null; primaryState = {revision: 0, primary_assistant: null}; operator = false; csrf = ''; spaces = []; actors = []; sid = ''; tab = 'inbox'; finishCreation(); $('#detail').close(); $('#detail-title').textContent = ''; $('#app').hidden = true; $('#login').hidden = false; $('#content').replaceChildren(); $('#detail-body').replaceChildren();}
+function showLogin() {configureLoginMode(); authEpoch++; loadEpoch++; stopUpdates(); reportHistory = []; inboxHead = null; primaryState = {revision: 0, primary_assistant: null}; operator = false; csrf = ''; spaces = []; actors = []; sid = ''; tab = 'inbox'; finishCreation(); $('#detail').close(); $('#detail-title').textContent = ''; $('#app').hidden = true; $('#login').hidden = false; $('#content').replaceChildren(); $('#detail-body').replaceChildren(); if (accountMode) notice(t('login.accountSessionRequired'));}
+function configureLoginMode() {
+  $('#login-form').hidden = accountMode;
+  $('#login .fine').hidden = accountMode;
+  if (accountMode) {
+    $('#request-access').hidden = true;
+    $('#account-setup').hidden = false;
+    $('#account-setup').textContent = t('login.accountReturn');
+    document.querySelectorAll('a.brand').forEach(link => {link.href = '/dashboard?auth=account';});
+  }
+}
+async function resumeSession(requesting = false) {
+  let session;
+  try {session = await api('/admin/session');}
+  catch (error) {
+    showLogin();
+    notice(accountMode && [401,403].includes(error.status) ? t('login.accountSessionRequired') : error.message);
+    if (!accountMode && requesting && error.status === 401) $('#request-access').click();
+    return;
+  }
+  try {await entered(session);}
+  catch (error) {notice(error.message);}
+}
+configureLoginMode();
 async function entered(session) {authEpoch++; primaryState = {revision: 0, primary_assistant: null}; spaces = []; actors = []; sid = ''; $('#space').replaceChildren(); $('#content').replaceChildren(); $('#add-agent').hidden = true; pageSize = Math.max(1, Math.min(20, session.limits?.max_page_size || 20)); operator = session.operator; $('#service-management').hidden = !operator; $('#operator-label').hidden = !operator; $('#invite-user').hidden = !operator || !onboarding.invitations_enabled; $('#access-requests-tab').hidden = !operator || !onboarding.invitations_enabled; csrf = session.csrf_token; $('#new-space').hidden = !session.operator; $('#owner-credential').hidden = !session.operator; $('#login').hidden = true; $('#app').hidden = false; await loadSpaces();}
 async function registry(kind, space_id) {
   let cursor = null; const items = [];
@@ -245,7 +270,7 @@ async function renderPrivacy() {
   const preview = el('div', undefined, 'card'), input = el('textarea'); input.placeholder = t('priv.previewPh'); input.setAttribute('aria-label', t('priv.previewAria'));
   preview.append(el('h2', t('priv.previewH')), input, button(t('priv.previewBtn'), async () => {showDetail(t('priv.previewTitle'), await api(`/admin/v0/spaces/${sid}/privacy/preview`, 'POST', {text: input.value}));}), button(t('priv.auditBtn'), async () => {showDetail(t('priv.auditTitle'), await api(`/admin/v0/spaces/${sid}/privacy/audit`));})); $('#content').append(preview);
 }
-$('#login-form').addEventListener('submit', event => {event.preventDefault(); const submit = event.currentTarget.querySelector('button'); busy(submit, async () => {const session = await api('/admin/session', 'POST', {admin_secret: $('#secret').value}); $('#secret').value = ''; await entered(session);});});
+$('#login-form').addEventListener('submit', event => {event.preventDefault(); if (accountMode) {$('#secret').value = ''; notice(t('login.accountSessionRequired')); return;} const submit = event.currentTarget.querySelector('button'); busy(submit, async () => {const session = await api('/admin/session', 'POST', {admin_secret: $('#secret').value}); $('#secret').value = ''; await entered(session);});});
 $('#space').addEventListener('change', () => {sid = $('#space').value; $('#detail').close(); $('#detail-body').replaceChildren(); busy($('#refresh'), () => load());});
 $('#refresh').addEventListener('click', () => busy($('#refresh'), () => load()));
 $('#new-messages').addEventListener('click', () => busy($('#new-messages'), () => load()));
@@ -482,15 +507,17 @@ async function startOnboardingSession() {
   $('#request-access').hidden = !onboarding.invitations_enabled;
   $('#account-setup').hidden = !onboarding.accounts_enabled;
   $('#account-setup-app').hidden = !onboarding.accounts_enabled;
+  configureLoginMode();
   $('#invite-user').hidden = !operator || !onboarding.invitations_enabled;
   $('#access-requests-tab').hidden = !operator || !onboarding.invitations_enabled;
   if (!onboarding.invitations_enabled && pendingCreation()?.type === 'invite') finishCreation();
+  if (accountMode) {await resumeSession(); return;}
   if (oldLink && !onboarding.invitations_enabled) {
-    try {await entered(await api('/admin/session'));} catch {showLogin();}
+    await resumeSession();
     notice(t(onboarding.accounts_enabled ? 'login.accountSetupRequired' : 'login.onboardingUnavailable'));
     return;
   }
-  if (!invitation) {const requesting = parameters.has('request-access'); if (requesting) history.replaceState(null, '', location.pathname + location.search); try {await entered(await api('/admin/session'));} catch {showLogin(); if (requesting) $('#request-access').click();} return;}
+  if (!invitation) {const requesting = parameters.has('request-access'); if (requesting) history.replaceState(null, '', location.pathname + location.search); await resumeSession(requesting); return;}
   history.replaceState(null, '', location.pathname + location.search);
   let session;
   try {

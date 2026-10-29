@@ -103,3 +103,22 @@ test('Space selection clears management controls and stale detached actions cann
  assert.equal(doc.querySelector('#management-connections button'),null);
  const count=calls.length;stale.click();await wait();assert.equal(calls.length,count);dom.window.close();
 });
+
+test('dashboard entry requires an explicitly selected owned Space and uses account mode',async()=>{
+  const {dom,doc}=fixture();
+  try {
+    await wait();
+    assert.equal(doc.getElementById('open-dashboard').hidden,true);
+    assert.match(doc.getElementById('dashboard-selection').textContent,/Select a Space/);
+    let selects=0;
+    dom.window.fetch=async(path,options)=>{
+      if(path==='/account/spaces/select') {selects++; assert.equal(JSON.parse(options.body).space_id,'s');}
+      return {ok:true,json:async()=>({ok:true,data:path==='/account/session'?{account_id:'a',csrf_token:'csrf',selected_space_id:'s',spaces:[{space_id:'s',display_name:'Chosen Space'}]}:{}})};
+    };
+    doc.querySelector('#spaces button').click();await wait();
+    assert.equal(selects,1);
+    assert.equal(doc.getElementById('open-dashboard').hidden,false);
+    assert.equal(doc.getElementById('open-dashboard').getAttribute('href'),'/dashboard?auth=account');
+    assert.match(doc.getElementById('open-dashboard').textContent,/Chosen Space/);
+  } finally {dom.window.close();}
+});

@@ -43,7 +43,7 @@ impl Error {
     pub fn status(&self) -> u16 {
         match self.code {
             "UNAUTHENTICATED" => 401,
-            "FORBIDDEN" => 403,
+            "FORBIDDEN" | "SPACE_SELECTION_REQUIRED" => 403,
             "NOT_FOUND" => 404,
             "IDEMPOTENCY_CONFLICT"
             | "REVISION_CONFLICT"

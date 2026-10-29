@@ -9,7 +9,7 @@ import {Miniflare,Log,LogLevel} from '../examples/mcp-client/node_modules/minifl
 
 const root=fileURLToPath(new URL('../',import.meta.url)),origin='http://127.0.0.1:8793';
 const secret=()=>randomBytes(32).toString('base64url');
-const oldOperator=secret(),operatorCookie=secret(),accountCookie=secret(),otherCookie=secret(),ownerKey=secret();
+const oldOperator=secret(),operatorCookie=secret(),ownerCookie=secret(),accountCookie=secret(),otherCookie=secret(),ownerKey=secret();
 const tokens={keep:secret(),revoke:secret(),other:secret(),foreign:secret(),oauth:secret(),oauth_other:secret()};
 const digest=value=>createHash('sha256').update(value).digest();
 const key=createPublicKey(createPrivateKey(await readFile(new URL('fixtures/oidc-test-private.pem',import.meta.url)))).export({format:'jwk'});
@@ -69,6 +69,7 @@ try {
     ]),
     db.prepare("INSERT INTO account_sessions(session_digest,account_id,selected_space_id,created_at,expires_at) VALUES(?,'account_a','space_a',?,?),(?,'account_b','space_foreign',?,?)").bind(digest(accountCookie),now,now+3600000,digest(otherCookie),now,now+3600000),
     db.prepare('INSERT INTO admin_sessions(session_digest,admin_fingerprint,created_at,expires_at,space_id) VALUES(?,?,?,?,NULL)').bind(digest(operatorCookie),digest(oldOperator),now,now+3600000),
+    db.prepare("INSERT INTO admin_sessions(session_digest,admin_fingerprint,created_at,expires_at,space_id) VALUES(?,?,?,?,'space_a')").bind(digest(ownerCookie),digest(ownerKey),now,now+3600000),
     db.prepare("INSERT INTO space_admin_credentials(space_id,credential_digest,version,created_at) VALUES('space_a',?,1,?)").bind(digest(ownerKey),now),
     ...Object.entries(tokens).map(([name,token])=>{
       const label=name==='foreign'?'foreign':name.endsWith('other')?'other':'a';
@@ -97,6 +98,64 @@ try {
   const session=ok(await response('/account/session',{headers:{cookie:'waypost_account='+accountCookie}}));csrf=session.csrf_token;
   ok(await response('/ready',{headers:{cookie:'waypost_account='+accountCookie}}));
   ok(await response('/ready',{headers:{authorization:'Bearer '+ownerKey}}));
+  phase='Dashboard account-cookie session bootstrap';
+  const dashboardCookie={cookie:'waypost_account='+accountCookie};
+  const dashboardSession=ok(await response('/admin/session',{headers:dashboardCookie}));
+  assert.equal(dashboardSession.operator,false);assert.equal(dashboardSession.space_id,'space_a');
+  const dashboardHeaders={...dashboardCookie,origin,'x-waypost-csrf':dashboardSession.csrf_token};
+  phase='Dashboard registry spaces and actors';
+  const visibleSpaces=ok(await response('/admin/v0/registry',{method:'POST',body:{kind:'spaces',limit:20,cursor:null},headers:dashboardHeaders}));
+  assert.deepEqual(visibleSpaces.items.map(item=>item.space_id),['space_a']);
+  const visibleActors=ok(await response('/admin/v0/registry',{method:'POST',body:{kind:'actors',space_id:'space_a',limit:20,cursor:null},headers:dashboardHeaders}));
+  assert(visibleActors.items.some(item=>item.actor_id==='actor_a'));
+  phase='Dashboard primary assistant and inbox';
+  ok(await response('/admin/v0/spaces/space_a/primary-assistant',{headers:dashboardCookie}));
+  const inbox=ok(await response('/admin/v0/spaces/space_a/inspect',{method:'POST',body:{kind:'inbox',limit:20,cursor:null},headers:dashboardHeaders}));
+  assert(inbox.items.some(item=>item.message_id===message.message_id));
+  phase='Dashboard memory read';
+  await db.prepare("INSERT INTO memory_collections(space_id,collection_id,source_actor_id,scope,display_name,created_at) VALUES('space_a','collection_dashboard','actor_a','shared','Dashboard fixture',?)").bind(now).run();
+  const collections=ok(await response('/admin/v0/spaces/space_a/inspect',{method:'POST',body:{kind:'collections',limit:20,cursor:null},headers:dashboardHeaders}));
+  assert(collections.items.some(item=>item.collection_id==='collection_dashboard'));
+  const memory=ok(await response('/admin/v0/spaces/space_a/memory/collection_dashboard/read',{method:'POST',body:{limit:20},headers:dashboardHeaders}));
+  assert.equal(memory.collection_id,'collection_dashboard');assert.deepEqual(memory.items,[]);
+  phase='Dashboard CSRF and cross-space boundaries';
+  for(const path of ['/admin/v0/registry','/admin/v0/spaces/space_a/inspect','/admin/v0/spaces/space_a/memory/collection_dashboard/read']) {
+    const body=path.endsWith('/registry')?{kind:'spaces'}:path.endsWith('/inspect')?{kind:'inbox'}:{};
+    for(const headers of [{...dashboardCookie,origin},{...dashboardCookie,origin,'x-waypost-csrf':'incorrect'}])assert.equal((await response(path,{method:'POST',body,headers})).status,403);
+  }
+  for(const target of ['other','foreign']) {
+    assert.equal((await response('/admin/v0/registry',{method:'POST',body:{kind:'actors',space_id:'space_'+target},headers:dashboardHeaders})).status,404);
+    assert.equal((await response('/admin/v0/spaces/space_'+target+'/primary-assistant',{headers:dashboardCookie})).status,404);
+    assert.equal((await response('/admin/v0/spaces/space_'+target+'/inspect',{method:'POST',body:{kind:'inbox'},headers:dashboardHeaders})).status,404);
+    assert.equal((await response('/admin/v0/spaces/space_'+target+'/memory/collection_dashboard/read',{method:'POST',body:{},headers:dashboardHeaders})).status,404);
+  }
+  phase='Dashboard explicit account mode with legacy cookie coexistence';
+  const mixedCookies='waypost_account='+accountCookie+'; waypost_admin='+operatorCookie;
+  // Existing implicit mode retains legacy precedence, reproducing the old-session
+  // collision that previously sent a logged-in account owner back to key login.
+  assert.equal((await response('/admin/session',{headers:{cookie:mixedCookies}})).status,401);
+  const legacyOwner=ok(await response('/admin/session',{headers:{cookie:'waypost_admin='+ownerCookie}}));
+  assert.equal(legacyOwner.space_id,'space_a');
+  const explicitAccountHeaders={cookie:mixedCookies,'x-waypost-auth':'account'};
+  const explicitAccount=ok(await response('/admin/session',{headers:explicitAccountHeaders}));
+  assert.equal(explicitAccount.account_id,'account_a');assert.equal(explicitAccount.space_id,'space_a');
+  const explicitWrites={...explicitAccountHeaders,origin,'x-waypost-csrf':explicitAccount.csrf_token};
+  const explicitSpaces=ok(await response('/admin/v0/registry',{method:'POST',body:{kind:'spaces'},headers:explicitWrites}));
+  assert.deepEqual(explicitSpaces.items.map(item=>item.space_id),['space_a']);
+  ok(await response('/admin/v0/registry',{method:'POST',body:{kind:'actors',space_id:'space_a'},headers:explicitWrites}));
+  ok(await response('/admin/v0/spaces/space_a/primary-assistant',{headers:explicitAccountHeaders}));
+  const explicitInbox=ok(await response('/admin/v0/spaces/space_a/inspect',{method:'POST',body:{kind:'inbox'},headers:explicitWrites}));
+  assert(explicitInbox.items.some(item=>item.message_id===message.message_id));
+  ok(await response('/admin/v0/spaces/space_a/memory/collection_dashboard/read',{method:'POST',body:{},headers:explicitWrites}));
+  const invalidAccount={cookie:'waypost_account='+secret()+'; waypost_admin='+ownerCookie,'x-waypost-auth':'account'};
+  assert.equal((await response('/admin/session',{headers:invalidAccount})).status,401);
+  // The valid legacy session's CSRF must not authenticate an account-mode POST.
+  const invalidWrites={...invalidAccount,origin,'x-waypost-csrf':legacyOwner.csrf_token};
+  assert.equal((await response('/admin/v0/registry',{method:'POST',body:{kind:'spaces'},headers:invalidWrites})).status,403);
+  assert.equal((await response('/admin/v0/spaces/space_a/memory/collection_dashboard/read',{method:'POST',body:{},headers:invalidWrites})).status,403);
+  assert.equal((await response('/admin/session',{headers:{'x-waypost-auth':'account',authorization:'Bearer '+ownerKey}})).status,401);
+  for(const headers of [{...explicitAccountHeaders,origin},{...explicitAccountHeaders,origin,'x-waypost-csrf':'wrong'}])assert.equal((await response('/admin/v0/registry',{method:'POST',body:{kind:'spaces'},headers})).status,403);
+  assert.equal((await response('/admin/v0/spaces/space_other/inspect',{method:'POST',body:{kind:'inbox'},headers:explicitWrites})).status,404);
   phase='selected space connection scope';
   const connections=ok(await account('/account/connections/list'));
   assert.equal(connections.space_id,'space_a');assert(connections.items.some(item=>item.token_id==='token_keep'));
@@ -142,7 +201,7 @@ try {
   ok(await agent('/v0/messages/'+message.message_id));
   ok(await agent('/v0/describe',undefined,tokens.oauth_other));
   assert.equal(unexpectedOutbound,0);
-  console.log(JSON.stringify({result:'passed',runtime:'actual compiled Worker/local Miniflare D1',identity:'synthetic seeded accounts, sessions and historical credentials',missing_admin_secret:true,invalid_configurations_rejected:5,retained_admin_secret_disabled:true,operator_bearer_and_cookie_denied:true,legacy_agent_data:true,selected_space_management:true,expired_session_denied:true,stale_space_intent_denied:true,account_and_scoped_owner_readiness:true,scoped_connection_and_oauth_revoke:true,self_managed_identity_and_primary:true,existing_recovery_compatibility:true,new_recovery_key_issued:false,external_requests:unexpectedOutbound,production_verified:false}));
+  console.log(JSON.stringify({result:'passed',runtime:'actual compiled Worker/local Miniflare D1',identity:'synthetic seeded accounts, sessions and historical credentials',missing_admin_secret:true,invalid_configurations_rejected:5,retained_admin_secret_disabled:true,operator_bearer_and_cookie_denied:true,legacy_agent_data:true,account_cookie_dashboard_bootstrap:true,explicit_account_mode_ignores_old_admin_cookie:true,invalid_account_no_legacy_fallback:true,dashboard_memory_read:true,dashboard_csrf_and_space_boundaries:true,selected_space_management:true,expired_session_denied:true,stale_space_intent_denied:true,account_and_scoped_owner_readiness:true,scoped_connection_and_oauth_revoke:true,self_managed_identity_and_primary:true,existing_recovery_compatibility:true,new_recovery_key_issued:false,external_requests:unexpectedOutbound,production_verified:false}));
 } catch(error) {
   console.error(JSON.stringify({result:'failed',phase,error_type:error.constructor.name,assertion_line:error.stack?.split('\n').find(line=>line.includes('operator_retirement_worker.mjs:'))?.trim(),actual:typeof error.actual==='number'?error.actual:undefined,expected:typeof error.expected==='number'?error.expected:undefined}));process.exitCode=1;
 } finally {await mf.dispose();}

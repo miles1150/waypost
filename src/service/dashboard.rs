@@ -89,6 +89,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         )?))
     }
     pub(crate) async fn admin_access(&self, request: &Request) -> Result<Option<String>> {
+        validate_auth_mode(request)?;
         if request.headers.contains_key("authorization") {
             return self.admin_identity(request).await;
         }
@@ -96,7 +97,13 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             let account = self
                 .account_session(request, request.method != "GET")
                 .await?;
-            let space = text(&account, "selected_space_id").map_err(|_| Error::forbidden())?;
+            let space = crate::storage::driver::optional_text(&account, "selected_space_id")
+                .ok_or_else(|| {
+                    Error::new(
+                        "SPACE_SELECTION_REQUIRED",
+                        "Select an owned Space in your account before opening the dashboard.",
+                    )
+                })?;
             check_id(&space)?;
             let owned = self
                 .db
@@ -163,6 +170,10 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         }
     }
     async fn session_action(&self, request: &Request) -> Result<(Value, Option<String>)> {
+        let account_mode = validate_auth_mode(request)?;
+        if account_mode && request.method == "POST" {
+            return Err(Error::forbidden());
+        }
         if request
             .headers
             .get("origin")
@@ -550,9 +561,10 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         Ok(json!({"items":items,"has_more":more,"next_cursor":cursor}))
     }
 }
-// An explicit Bearer credential or current-origin admin cookie always wins.
+// Without explicit account mode, a Bearer credential or current admin cookie wins.
 // HTTPS ignores obsolete unprefixed names, including sibling-injected cookies.
-// An invalid current admin cookie must not fall back to account authority.
+// An invalid current admin cookie must not silently fall back to account authority.
+// Explicit account mode ignores admin cookies and rejects conflicting Bearer headers.
 pub(super) fn admin_cookie_header(origin: &str, value: &str, max_age: u32) -> String {
     let name = super::accounts::browser_cookie_name(origin, super::accounts::BrowserCookie::Admin);
     let (path, secure) = if origin.starts_with("https://") {
@@ -562,7 +574,25 @@ pub(super) fn admin_cookie_header(origin: &str, value: &str, max_age: u32) -> St
     };
     format!("{name}={value}; Path={path}; HttpOnly; SameSite=Strict; Max-Age={max_age}{secure}")
 }
+// Explicit account mode is an authority choice, never an authentication bypass.
+// Reject conflicting bearer credentials instead of guessing which identity wins.
+fn validate_auth_mode(request: &Request) -> Result<bool> {
+    match request.headers.get("x-waypost-auth").map(String::as_str) {
+        None => Ok(false),
+        Some("account") if !request.headers.contains_key("authorization") => Ok(true),
+        _ => Err(Error::invalid(
+            "Invalid or conflicting dashboard authentication mode.",
+        )),
+    }
+}
 pub(super) fn uses_account_session(request: &Request, origin: &str) -> bool {
+    if request
+        .headers
+        .get("x-waypost-auth")
+        .is_some_and(|value| value == "account")
+    {
+        return true;
+    }
     let expected =
         super::accounts::browser_cookie_name(origin, super::accounts::BrowserCookie::Admin);
     !request.headers.contains_key("authorization")
