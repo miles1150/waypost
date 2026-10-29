@@ -56,15 +56,21 @@ async function api(path, body, method = 'POST') {
 async function refresh() {
   resetManagement();
   resetOAuthConsent();
+  el('open-dashboard').hidden = true;
+  el('dashboard-selection').textContent = 'Sign in and select a Space above before opening its dashboard.';
   const data = await api('/account/session', null, 'GET');
   csrf = data.csrf_token;
   el('status').textContent = `Account: ${data.account_id}\nSelected Space: ${data.selected_space_id || 'none'}`;
+  const selected = data.spaces.find(space => space.space_id === data.selected_space_id);
+  el('open-dashboard').hidden = !selected;
+  el('open-dashboard').textContent = selected ? `Open dashboard: ${selected.display_name} (${selected.space_id})` : 'Open selected Space dashboard';
+  el('dashboard-selection').textContent = selected ? `Selected Space: ${selected.display_name} (${selected.space_id})` : 'Select a Space above before opening its dashboard.';
   el('spaces').replaceChildren();
   for (const space of data.spaces) {
     const li = document.createElement('li');
     const button = document.createElement('button');
-    button.textContent = `${space.display_name} (${space.space_id})`;
-    button.onclick = () => run(async () => {resetManagement(); resetOAuthConsent(); await api('/account/spaces/select', {space_id: space.space_id}); await refresh();});
+    button.textContent = `${space.space_id === data.selected_space_id ? 'Selected' : 'Select'}: ${space.display_name} (${space.space_id})`;
+    button.onclick = () => run(async () => {resetManagement(); resetOAuthConsent(); el('open-dashboard').hidden = true; el('dashboard-selection').textContent = 'Selecting Space…'; await api('/account/spaces/select', {space_id: space.space_id}); await refresh();});
     li.append(button); el('spaces').append(li);
   }
   if (oauthRequest) await reviewOAuth();

@@ -1476,4 +1476,218 @@ mod tests {
             assert_eq!(response.status(),200);handle.abort();
         }).await;
     }
+    #[tokio::test(flavor = "current_thread")]
+    async fn pure_account_dashboard_bootstrap_chain_preserves_csrf_and_space_scope() {
+        let (_dir, mut app, _, sid) = fixture().await;
+        app.config.public_origin = "https://waypost.example".into();
+        assert_eq!(
+            action(
+                &app,
+                "/account/spaces/claim",
+                json!({"space_id":sid,"owner_credential":OWNER})
+            )
+            .await
+            .status,
+            200
+        );
+        assert_eq!(
+            action(&app, "/account/spaces/select", json!({"space_id":sid}))
+                .await
+                .status,
+            200
+        );
+        app = app
+            .with_csrf_secret("independent-dashboard-csrf-secret-32-bytes")
+            .unwrap()
+            .with_cursor_secret("independent-dashboard-cursor-secret-32-bytes")
+            .unwrap()
+            .with_operator_mode("disabled")
+            .unwrap();
+        let mut session = request(&app, "/admin/session", json!({}));
+        session.method = "GET".into();
+        session.headers.remove("origin");
+        let response = app.handle(session).await;
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let data: Value = serde_json::from_slice(&response.body).unwrap();
+        let data = &data["data"];
+        assert_eq!(data["space_id"], sid);
+        assert_eq!(data["account_id"], "account_test");
+        assert_eq!(data["operator"], false);
+        let csrf = data["csrf_token"].as_str().unwrap();
+        for (method, path, body) in [
+            (
+                "POST",
+                "/admin/v0/registry".to_owned(),
+                json!({"kind":"spaces","limit":25}),
+            ),
+            (
+                "POST",
+                "/admin/v0/registry".to_owned(),
+                json!({"kind":"actors","space_id":sid,"limit":25}),
+            ),
+            (
+                "GET",
+                format!("/admin/v0/spaces/{sid}/primary-assistant"),
+                json!({}),
+            ),
+            (
+                "POST",
+                format!("/admin/v0/spaces/{sid}/inspect"),
+                json!({"kind":"inbox","limit":20}),
+            ),
+            (
+                "POST",
+                format!("/admin/v0/spaces/{sid}/inspect"),
+                json!({"kind":"collections","limit":20}),
+            ),
+        ] {
+            let mut r = request(&app, &path, body);
+            r.method = method.into();
+            r.headers.insert("x-waypost-csrf".into(), csrf.into());
+            if method == "POST" {
+                let mut no_csrf = r.clone();
+                no_csrf.headers.remove("x-waypost-csrf");
+                assert_eq!(app.handle(no_csrf).await.status, 403);
+                let mut foreign = r.clone();
+                foreign
+                    .headers
+                    .insert("origin".into(), "https://evil.example".into());
+                assert_eq!(app.handle(foreign).await.status, 403);
+            }
+            let response = app.handle(r).await;
+            assert_eq!(
+                response.status,
+                200,
+                "{path}: {}",
+                String::from_utf8_lossy(&response.body)
+            );
+        }
+        for (method, path, body) in [
+            (
+                "POST",
+                "/admin/v0/registry",
+                json!({"kind":"actors","space_id":"foreign_space"}),
+            ),
+            (
+                "POST",
+                "/admin/v0/registry",
+                json!({"kind":"spaces","space_id":"foreign_space"}),
+            ),
+            (
+                "POST",
+                "/admin/v0/spaces/foreign_space/inspect",
+                json!({"kind":"inbox"}),
+            ),
+            (
+                "POST",
+                "/admin/v0/spaces/foreign_space/inspect",
+                json!({"kind":"collections"}),
+            ),
+            (
+                "GET",
+                "/admin/v0/spaces/foreign_space/primary-assistant",
+                json!({}),
+            ),
+        ] {
+            let mut r = request(&app, path, body);
+            r.method = method.into();
+            assert_eq!(app.handle(r).await.status, 404, "{path}");
+        }
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn explicit_dashboard_account_mode_ignores_stale_admin_without_authority_fallback() {
+        let (_dir, mut app, _, sid) = fixture().await;
+        app.config.public_origin = "https://waypost.example".into();
+        assert_eq!(
+            action(
+                &app,
+                "/account/spaces/claim",
+                json!({"space_id":sid,"owner_credential":OWNER})
+            )
+            .await
+            .status,
+            200
+        );
+        let mut r = request(&app, "/admin/session", json!({}));
+        r.method = "GET".into();
+        r.headers.insert("x-waypost-auth".into(), "account".into());
+        let response = app.handle(r.clone()).await;
+        assert_eq!(response.status, 403);
+        let error: Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(error["error"]["code"], "SPACE_SELECTION_REQUIRED");
+        assert_eq!(
+            action(&app, "/account/spaces/select", json!({"space_id":sid}))
+                .await
+                .status,
+            200
+        );
+        // A real but expired admin cookie previously masked an otherwise valid account.
+        let cookie = r.headers["cookie"].clone();
+        r.headers.insert(
+            "cookie".into(),
+            format!("{cookie}; __Host-waypost_admin=stale-admin"),
+        );
+        let mut implicit = r.clone();
+        implicit.headers.remove("x-waypost-auth");
+        assert_eq!(app.handle(implicit).await.status, 401);
+        assert_eq!(app.handle(r.clone()).await.status, 200);
+        for mode in ["operator", "ACCOUNT", ""] {
+            let mut bad = r.clone();
+            bad.headers.insert("x-waypost-auth".into(), mode.into());
+            assert_eq!(app.handle(bad).await.status, 400);
+        }
+        let mut bearer = r.clone();
+        bearer.headers.insert(
+            "authorization".into(),
+            format!("Bearer {}", app.config.admin_secret),
+        );
+        assert_eq!(app.handle(bearer).await.status, 400);
+        let mut post = r.clone();
+        post.method = "POST".into();
+        post.body = serde_json::to_vec(&json!({"admin_secret":OWNER})).unwrap();
+        assert_eq!(app.handle(post).await.status, 403);
+        // A valid owner admin session must never rescue an invalid explicit account.
+        let login = action(&app, "/admin/session", json!({"admin_secret":OWNER})).await;
+        assert_eq!(login.status, 200);
+        let admin_cookie = login.headers["set-cookie"].split(';').next().unwrap();
+        let mut invalid = r.clone();
+        invalid.headers.insert(
+            "cookie".into(),
+            format!("__Host-waypost_account=invalid; {admin_cookie}"),
+        );
+        assert_eq!(app.handle(invalid).await.status, 401);
+        // Explicit account selection also applies to non-session bootstrap routes.
+        r.path = "/admin/v0/registry".into();
+        r.method = "POST".into();
+        r.body = serde_json::to_vec(&json!({"kind":"actors","space_id":sid})).unwrap();
+        assert_eq!(app.handle(r.clone()).await.status, 200);
+        r.headers.remove("x-waypost-csrf");
+        assert_eq!(app.handle(r).await.status, 403);
+        let mut logout = request(&app, "/admin/session", json!({}));
+        logout.method = "DELETE".into();
+        logout
+            .headers
+            .insert("x-waypost-auth".into(), "account".into());
+        logout
+            .headers
+            .insert("cookie".into(), format!("{cookie}; {admin_cookie}"));
+        let response = app.handle(logout).await;
+        assert_eq!(response.status, 200);
+        assert!(response.headers["set-cookie"].starts_with("__Host-waypost_account=;"));
+        let mut legacy = request(&app, "/admin/session", json!({}));
+        legacy.method = "GET".into();
+        legacy.headers.insert("cookie".into(), admin_cookie.into());
+        assert_eq!(app.handle(legacy).await.status, 200);
+        let mut account = request(&app, "/admin/session", json!({}));
+        account.method = "GET".into();
+        account
+            .headers
+            .insert("x-waypost-auth".into(), "account".into());
+        assert_eq!(app.handle(account).await.status, 401);
+    }
 }

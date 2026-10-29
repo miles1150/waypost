@@ -270,5 +270,7 @@
   "routing.reload": "Reload current routing",
   "login.accountSetup": "Open account setup",
   "login.accountSetupRequired": "This link is no longer available. Open account setup to sign in and select your Space.",
-  "login.onboardingUnavailable": "This entry is unavailable. Use your saved sign-in key, or contact the service owner for account setup."
+  "login.onboardingUnavailable": "This entry is unavailable. Use your saved sign-in key, or contact the service owner for account setup.",
+  "login.accountReturn": "Return to account and select a Space",
+  "login.accountSessionRequired": "Sign in to your account and select a Space to open this dashboard."
 }

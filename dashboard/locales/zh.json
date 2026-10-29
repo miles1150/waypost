@@ -270,5 +270,7 @@
   "routing.reload": "重新加载当前设置",
   "login.accountSetup": "打开账号设置",
   "login.accountSetupRequired": "此链接已停止使用。请打开账号设置，登录并选择你的空间。",
-  "login.onboardingUnavailable": "此入口暂不可用。请使用已保存的登录密钥，或联系服务所有者设置账号。"
+  "login.onboardingUnavailable": "此入口暂不可用。请使用已保存的登录密钥，或联系服务所有者设置账号。",
+  "login.accountReturn": "返回账号并选择空间",
+  "login.accountSessionRequired": "请登录账号并选择空间，再打开此控制台。"
 }
