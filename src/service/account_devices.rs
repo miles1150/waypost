@@ -248,6 +248,7 @@ mod tests {
             authorization_endpoint: "https://issuer.example/authorize".into(),
             token_endpoint: "https://issuer.example/token".into(),
             client_secret: None,
+            google_jwks: false,
             keys: vec![],
         });
         let req = Request::json(
