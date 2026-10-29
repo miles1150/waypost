@@ -25,6 +25,7 @@ pub fn open_app(data: &Path, config: Config) -> Result<NativeApp> {
 }
 // One executor thread; requests yield at I/O boundaries. SQLite batches remain atomic.
 pub async fn serve(listener: tokio::net::TcpListener, app: Rc<NativeApp>) -> std::io::Result<()> {
+    app.validate_runtime_auth().map_err(std::io::Error::other)?;
     loop {
         let (stream, _) = listener.accept().await?;
         let app = app.clone();

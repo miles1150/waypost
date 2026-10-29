@@ -10,7 +10,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() || args.iter().any(|s| s == "--help" || s == "-h") {
         println!(
-            "Waypost\n\n  waypost init [--data ./var]\n  waypost encrypt [--data ./var]\n  waypost serve [--data ./var] [--listen 127.0.0.1:8787]\n\nWAYPOST_ADMIN_SECRET overrides the private admin-secret file.\nWAYPOST_ENCRYPTION_KEYS sets the private JSON encryption keyring.\nWAYPOST_CURSOR_SECRET optionally separates cursor signing from admin rotation.\nWAYPOST_PUBLIC_ORIGIN sets the browser Origin / generated HTTP URLs."
+            "Waypost\n\n  waypost init [--data ./var]\n  waypost encrypt [--data ./var]\n  waypost serve [--data ./var] [--listen 127.0.0.1:8787]\n\nWAYPOST_ADMIN_SECRET overrides the private admin-secret file.\nWAYPOST_ENCRYPTION_KEYS sets the private JSON encryption keyring.\nWAYPOST_CURSOR_SECRET optionally separates cursor signing from admin rotation.\nWAYPOST_CSRF_SECRET optionally separates browser CSRF signing from admin rotation.\nWAYPOST_OPERATOR_MODE=disabled retires global operator access; requires OIDC and independent cursor/CSRF secrets.\nWAYPOST_PUBLIC_ORIGIN sets the browser Origin / generated HTTP URLs."
         );
         return Ok(());
     }
@@ -30,32 +30,52 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         i += 2;
     }
+    let operator_mode = std::env::var("WAYPOST_OPERATOR_MODE").unwrap_or_else(|_| "enabled".into());
+    if !["enabled", "disabled"].contains(&operator_mode.as_str()) {
+        return Err("Operator mode must be enabled or disabled.".into());
+    }
+    let operator_disabled = operator_mode == "disabled";
+    if operator_disabled && command == "encrypt" {
+        return Err("Offline encryption maintenance requires explicitly enabled operator mode; disabled mode never re-enables it.".into());
+    }
+    if operator_disabled
+        && (std::env::var("WAYPOST_OIDC_CONFIG_FILE").is_err()
+            || std::env::var("WAYPOST_CURSOR_SECRET").is_err()
+            || std::env::var("WAYPOST_CSRF_SECRET").is_err())
+    {
+        return Err("Disabled operator requires explicit OIDC configuration and independent cursor/CSRF secrets.".into());
+    }
     std::fs::create_dir_all(&data)?;
     let secret = match std::env::var("WAYPOST_ADMIN_SECRET") {
         Ok(value) => value,
         Err(_) => {
             let path = data.join("admin-secret");
-            if !path.exists() {
-                use std::io::Write;
-                let mut bytes = [0; 32];
-                getrandom::getrandom(&mut bytes).map_err(|_| "Unable to generate credential.")?;
-                let mut options = std::fs::OpenOptions::new();
-                options.write(true).create_new(true);
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::OpenOptionsExt;
-                    options.mode(0o600);
-                }
-                match options.open(&path) {
-                    Ok(mut file) => {
-                        file.write_all(hex::encode(bytes).as_bytes())?;
-                        file.sync_all()?
+            if operator_disabled && !path.exists() {
+                String::new()
+            } else {
+                if !path.exists() {
+                    use std::io::Write;
+                    let mut bytes = [0; 32];
+                    getrandom::getrandom(&mut bytes)
+                        .map_err(|_| "Unable to generate credential.")?;
+                    let mut options = std::fs::OpenOptions::new();
+                    options.write(true).create_new(true);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::OpenOptionsExt;
+                        options.mode(0o600);
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-                    Err(e) => return Err(e.into()),
+                    match options.open(&path) {
+                        Ok(mut file) => {
+                            file.write_all(hex::encode(bytes).as_bytes())?;
+                            file.sync_all()?
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                        Err(e) => return Err(e.into()),
+                    }
                 }
+                std::fs::read_to_string(path)?.trim().to_owned()
             }
-            std::fs::read_to_string(path)?.trim().to_owned()
         }
     };
     let _runtime_lock = std::fs::OpenOptions::new()
@@ -74,6 +94,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Err(_) => {
             let path = data.join("encryption-keys");
             if !path.exists() {
+                if operator_disabled {
+                    return Err("Disabled operator never generates secrets; configure or restore the encryption keyring.".into());
+                }
                 if data.join("metadata.sqlite").exists() {
                     return Err("Encryption keyring is missing. Restore encryption-keys, or explicitly configure WAYPOST_ENCRYPTION_KEYS for legacy migration.".into());
                 }
@@ -101,15 +124,28 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let migration_admin = secret.clone();
-    let app = server::open_app(
-        &data,
-        Config {
-            admin_secret: secret,
-            public_origin: origin.clone(),
-        },
-    )?;
+    let config = Config {
+        admin_secret: secret,
+        public_origin: origin.clone(),
+    };
+    let app = if operator_disabled {
+        // The temporary builder is never served before OIDC and independent signing
+        // keys are installed and with_operator_mode validates the complete setup.
+        waypost::App::new(
+            waypost::native::SqliteDb::open(data.join("metadata.sqlite"))?,
+            waypost::native::FileStore::open(data.join("objects"))?,
+            config,
+        )
+    } else {
+        server::open_app(&data, config)?
+    };
     let app = if let Ok(secret) = std::env::var("WAYPOST_CURSOR_SECRET") {
         app.with_cursor_secret(&secret)?
+    } else {
+        app
+    };
+    let app = if let Ok(secret) = std::env::var("WAYPOST_CSRF_SECRET") {
+        app.with_csrf_secret(&secret)?
     } else {
         app
     };
@@ -152,8 +188,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let app = app.with_onboarding_mode(
         &std::env::var("WAYPOST_ONBOARDING_MODE").unwrap_or_else(|_| "legacy".into()),
     )?;
+    let app = app.with_operator_mode(&operator_mode)?;
     let app = Rc::new(app);
     if command == "init" {
+        if operator_disabled {
+            println!(
+                "Initialized {} with operator access disabled; account authentication is configured. No operator credential was generated.",
+                data.display()
+            );
+            return Ok(());
+        }
         println!(
             "Initialized {}. Admin credential: {}/admin-secret (or WAYPOST_ADMIN_SECRET).",
             data.display(),

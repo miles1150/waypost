@@ -74,6 +74,14 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             _ => {}
         }
         let credential = bearer(request)?;
+        // Never reinterpret the retired global credential as a scoped owner key.
+        if !self.operator_enabled
+            && !self.config.admin_secret.is_empty()
+            && Sha256::digest(credential.as_bytes())
+                == Sha256::digest(self.config.admin_secret.as_bytes())
+        {
+            return Err(Error::unauthenticated());
+        }
         let rows=self.db.query(Statement::new("SELECT space_id FROM space_admin_credentials WHERE credential_digest=? AND revoked_at IS NULL",vec![Sha256::digest(credential.as_bytes()).to_vec().into()])).await?;
         Ok(Some(text(
             rows.first().ok_or_else(Error::unauthenticated)?,
@@ -129,7 +137,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         Ok(URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
     }
     async fn valid_session(&self, cookie: &str) -> Result<Option<String>> {
-        let rows=self.db.query(Statement::new("SELECT s.space_id FROM admin_sessions s WHERE s.session_digest=? AND s.expires_at>? AND ((s.space_id IS NULL AND s.admin_fingerprint=?) OR EXISTS(SELECT 1 FROM space_admin_credentials c WHERE c.space_id=s.space_id AND c.credential_digest=s.admin_fingerprint AND c.revoked_at IS NULL))",vec![Sha256::digest(cookie.as_bytes()).to_vec().into(),self.clock.now_ms().into(),Sha256::digest(self.config.admin_secret.as_bytes()).to_vec().into()])).await?;
+        let rows=self.db.query(Statement::new("SELECT s.space_id FROM admin_sessions s WHERE s.session_digest=? AND s.expires_at>? AND (? OR s.admin_fingerprint<>?) AND ((? AND s.space_id IS NULL AND s.admin_fingerprint=?) OR EXISTS(SELECT 1 FROM space_admin_credentials c WHERE c.space_id=s.space_id AND c.credential_digest=s.admin_fingerprint AND c.revoked_at IS NULL))",vec![Sha256::digest(cookie.as_bytes()).to_vec().into(),self.clock.now_ms().into(),(self.operator_enabled || self.config.admin_secret.is_empty()).into(),Sha256::digest(self.config.admin_secret.as_bytes()).to_vec().into(),self.operator_enabled.into(),Sha256::digest(self.config.admin_secret.as_bytes()).to_vec().into()])).await?;
         let row = rows.first().ok_or_else(Error::unauthenticated)?;
         match row.get("space_id") {
             Some(Sql::Null) => Ok(None),

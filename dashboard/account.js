@@ -2,6 +2,13 @@
 const el = id => document.getElementById(id);
 let csrf = '';
 let inspectedCode = null;
+let managementRevision = 0;
+let primarySelection = null;
+function resetManagement() {
+  managementRevision++; primarySelection=null;
+  for(const kind of ['connections','oauth','actors','consumers']) {el('management-'+kind).replaceChildren();el('more-'+kind).hidden=true;}
+  el('primary-clear').disabled=true;el('primary-info').textContent='';
+}
 let oauthPreview = false;
 let oauthDeviceCode = null;
 let oauthRevision = 0;
@@ -47,6 +54,7 @@ async function api(path, body, method = 'POST') {
   return value.data;
 }
 async function refresh() {
+  resetManagement();
   resetOAuthConsent();
   const data = await api('/account/session', null, 'GET');
   csrf = data.csrf_token;
@@ -56,7 +64,7 @@ async function refresh() {
     const li = document.createElement('li');
     const button = document.createElement('button');
     button.textContent = `${space.display_name} (${space.space_id})`;
-    button.onclick = () => run(async () => {resetOAuthConsent(); await api('/account/spaces/select', {space_id: space.space_id}); await refresh();});
+    button.onclick = () => run(async () => {resetManagement(); resetOAuthConsent(); await api('/account/spaces/select', {space_id: space.space_id}); await refresh();});
     li.append(button); el('spaces').append(li);
   }
   if (oauthRequest) await reviewOAuth();
@@ -128,4 +136,46 @@ for (const action of ['approve','deny']) el('oauth-device-'+action).onclick = ()
   await oauthApi('/oauth/device_consent',{action,user_code:code,...(action==='approve'?{actor_id:el('actor-id').value,consumer_id:el('consumer-id').value}:{})});
   el('status').textContent=action==='approve'?'OAuth device approved. Return to your client.':'OAuth device denied.';
 });
+
+async function managementPage(kind, cursor=null, revision=managementRevision) {
+  const identities=kind==='actors'||kind==='consumers';
+  const endpoint=identities?'identities':kind;
+  const body={...(identities?{kind}:{}),...(cursor?{cursor}:{})};
+  const data=await api('/account/'+endpoint+'/list',body);
+  if(revision!==managementRevision) return;
+  if(identities) {
+    primarySelection={space_id:data.space_id,expected_revision:data.primary_revision};
+    el('primary-info').textContent='Primary assistant: '+(data.primary_actor_id||'none');
+    el('primary-clear').disabled=false;
+  }
+  for(const item of data.items) {
+    const li=document.createElement('li');li.textContent=JSON.stringify(item)+' ';
+    const button=document.createElement('button');
+    const id=kind==='connections'?item.token_id:kind==='oauth'?item.family_id:kind==='actors'?item.actor_id:item.consumer_id;
+    button.textContent=identities?'Disable identity':'Revoke access';
+    button.disabled=Boolean(item.disabled||item.revoked_at!==null && item.revoked_at!==undefined);
+    button.onclick=()=>run(async()=>{
+      if(revision!==managementRevision) throw new Error('Refresh the selected Space before changing access.');
+      button.disabled=true;
+      try {
+        await api('/account/'+endpoint+(identities?'/disable':'/revoke'),{space_id:data.space_id,...(identities?{kind,identity_id:id}:kind==='connections'?{token_id:id}:{family_id:id})});
+        el('status').textContent=identities?'Identity disabled.':'Access revoked.';
+      } catch(error) {button.disabled=false;throw error;}
+    });
+    li.append(button);
+    if(identities) {
+      const use=document.createElement('button');use.textContent='Use for approval';use.disabled=item.disabled;
+      use.onclick=()=>{if(revision!==managementRevision)return;el('actor-id').value=item.actor_id;if(kind==='consumers')el('consumer-id').value=item.consumer_id;};li.append(use);
+    }
+    if(kind==='actors'&&item.kind==='agent'&&!item.disabled) {
+      const choose=document.createElement('button');choose.textContent='Make primary';
+      choose.onclick=()=>run(async()=>{if(revision!==managementRevision)throw new Error('Refresh Actors first.');await api('/account/primary/set',{space_id:data.space_id,expected_revision:data.primary_revision,actor_id:item.actor_id});resetManagement();await managementPage('actors');});li.append(choose);
+    }
+    el('management-'+kind).append(li);
+  }
+  const more=el('more-'+kind);more.hidden=!data.has_more;
+  more.onclick=()=>run(async()=>{more.disabled=true;try{await managementPage(kind,data.next_cursor,revision);}finally{more.disabled=false;}});
+}
+for(const kind of ['connections','oauth','actors','consumers']) el('manage-'+kind).onclick=()=>run(async()=>{el('management-'+kind).replaceChildren();el('more-'+kind).hidden=true;await managementPage(kind);});
+el('primary-clear').onclick=()=>run(async()=>{if(!primarySelection)throw new Error('List Actors first.');await api('/account/primary/set',{...primarySelection,actor_id:null});resetManagement();await managementPage('actors');});
 run(refresh);

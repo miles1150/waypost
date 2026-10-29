@@ -10,6 +10,10 @@ function fixture(url='https://example.test/account', hint=null){
  dom.window.fetch=async(path,options)=>{
   calls.push({path,options});
   if(path.startsWith('/oauth/')) return {ok:true,json:async()=>({request_id:'oauth_test',client_name:'<img onerror=alert(1)>',scope:'waypost',selected_space_id:'s',approved:true})};
+  if(['/account/connections/list','/account/oauth/list','/account/identities/list'].includes(path)) {
+   const items=path.includes('/connections/')?[{token_id:'legacy',actor_id:'actor',consumer_id:'consumer',credential_kind:'legacy',revoked_at:null}]:path.includes('/oauth/')?[{family_id:'family',client_id:'client',revoked_at:null}]:[{actor_id:'actor',consumer_id:'consumer',kind:'agent',display_name:'<img onerror=alert(1)>',disabled:false}];
+   return {ok:true,json:async()=>({ok:true,data:{space_id:'s',items,has_more:false,primary_actor_id:null,primary_revision:3}})};
+  }
   const data=path==='/account/session' ?{account_id:'a',csrf_token:'csrf',spaces:[{space_id:'s',display_name:'<img onerror=alert(1)>'}]}:
    path.endsWith('/inspect')?{display_name:'<script>untrusted</script>'}:
    path.endsWith('/list')?{devices:[{device_id:'d',display_name:'Device',state:'consumed'}],has_more:false}:{};
@@ -70,4 +74,32 @@ test('starting Space selection immediately disables OAuth consent while request 
  assert.equal(doc.getElementById('oauth-approve').disabled,true);
  assert.equal(doc.getElementById('oauth-deny').disabled,true);
  dom.window.close();
+});
+
+test('management revokes stable connection and OAuth IDs bound to the listed Space',async()=>{
+ const {dom,calls,doc}=fixture();await wait();
+ for(const [kind,key,id] of [['connections','token_id','legacy'],['oauth','family_id','family']]) {
+  doc.getElementById('manage-'+kind).click();await wait();
+  doc.querySelector('#management-'+kind+' button').click();await wait();
+  assert.equal(calls.at(-1).path,'/account/'+kind+'/revoke');
+  assert.deepEqual(JSON.parse(calls.at(-1).options.body),{space_id:'s',[key]:id});
+  assert.equal(calls.at(-1).options.headers['X-Waypost-CSRF'],'csrf');
+  assert.equal(doc.querySelector('#management-'+kind+' button').disabled,true);
+ }
+ dom.window.close();
+});
+test('management identity names are text and primary uses revision rather than owner defaults',async()=>{
+ const {dom,calls,doc}=fixture();await wait();doc.getElementById('manage-actors').click();await wait();
+ assert.equal(doc.querySelectorAll('#management-actors img').length,0);
+ assert.match(doc.getElementById('management-actors').textContent,/<img/);
+ const button=[...doc.querySelectorAll('#management-actors button')].find(b=>b.textContent==='Make primary');button.click();await wait();
+ const action=calls.find(c=>c.path==='/account/primary/set');
+ assert.deepEqual(JSON.parse(action.options.body),{space_id:'s',expected_revision:3,actor_id:'actor'});dom.window.close();
+});
+test('Space selection clears management controls and stale detached actions cannot mutate',async()=>{
+ const {dom,calls,doc}=fixture();await wait();doc.getElementById('manage-connections').click();await wait();
+ const stale=doc.querySelector('#management-connections button');
+ doc.querySelector('#spaces button').click();await wait();
+ assert.equal(doc.querySelector('#management-connections button'),null);
+ const count=calls.length;stale.click();await wait();assert.equal(calls.length,count);dom.window.close();
 });

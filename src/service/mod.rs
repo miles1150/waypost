@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, rc::Rc};
 mod account_devices;
+mod account_management;
 mod accounts;
 pub mod accounts_oidc;
 mod admin;
@@ -30,6 +31,8 @@ pub mod oauth;
 mod oauth_authorization;
 mod oauth_tokens;
 mod onboarding;
+#[cfg(all(test, feature = "native"))]
+mod operator_retirement_tests;
 mod privacy;
 mod receipts;
 mod token_routing;
@@ -91,6 +94,9 @@ pub struct App<D, O> {
     pub(crate) limits: Limits,
     cursor_key: [u8; 32],
     csrf_key: [u8; 32],
+    explicit_cursor_secret: Option<[u8; 32]>,
+    explicit_csrf_secret: Option<[u8; 32]>,
+    pub(crate) operator_enabled: bool,
     pub(crate) encryption: Option<encryption::Encryption>,
     pub(crate) oidc: Option<accounts_oidc::OidcConfig>,
     pub(crate) account_signup_limit: usize,
@@ -105,6 +111,9 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         Self {
             cursor_key: derive_key(&config.admin_secret, b"waypost-cursor-v2"),
             csrf_key: derive_key(&config.admin_secret, b"waypost-admin-csrf-v2"),
+            explicit_cursor_secret: None,
+            explicit_csrf_secret: None,
+            operator_enabled: true,
             encryption: None,
             oidc: None,
             account_signup_limit: 0,
@@ -137,6 +146,58 @@ impl<D: Database, O: ObjectStore> App<D, O> {
         };
         Ok(self)
     }
+    /// Separate browser CSRF authentication from the retireable operator credential.
+    pub fn with_csrf_secret(mut self, secret: &str) -> Result<Self> {
+        if secret.len() < 32 {
+            return Err(Error::invalid(
+                "CSRF secret must contain at least 32 bytes.",
+            ));
+        }
+        self.csrf_key = derive_key(secret, b"waypost-admin-csrf-v2");
+        self.explicit_csrf_secret = Some(Sha256::digest(secret.as_bytes()).into());
+        Ok(self)
+    }
+    /// Opt-in operator retirement validates configuration, not identity-provider
+    /// availability. Losing the external account can make account access unrecoverable.
+    pub fn with_operator_mode(mut self, mode: &str) -> Result<Self> {
+        self.operator_enabled = match mode {
+            "enabled" => true,
+            "disabled" => false,
+            _ => return Err(Error::invalid("Operator mode must be enabled or disabled.")),
+        };
+        self.validate_runtime_auth()?;
+        Ok(self)
+    }
+    pub fn validate_runtime_auth(&self) -> Result<()> {
+        if self.operator_enabled {
+            if self.config.admin_secret.len() < 32 {
+                return Err(Error::invalid(
+                    "Admin secret must contain at least 32 bytes.",
+                ));
+            }
+            return Ok(());
+        }
+        if self.oidc.is_none() || self.oidc_exchange.is_none() {
+            return Err(Error::invalid(
+                "Disabled operator requires configured OIDC account authentication.",
+            ));
+        }
+        let (Some(cursor), Some(csrf)) = (self.explicit_cursor_secret, self.explicit_csrf_secret)
+        else {
+            return Err(Error::invalid(
+                "Disabled operator requires explicit cursor and CSRF secrets.",
+            ));
+        };
+        let admin: [u8; 32] = Sha256::digest(self.config.admin_secret.as_bytes()).into();
+        if cursor == csrf
+            || (!self.config.admin_secret.is_empty() && (cursor == admin || csrf == admin))
+        {
+            return Err(Error::invalid(
+                "Cursor, CSRF and operator secrets must be independent.",
+            ));
+        }
+        Ok(())
+    }
     pub fn with_cursor_secret(mut self, secret: &str) -> Result<Self> {
         if secret.len() < 32 {
             return Err(Error::invalid(
@@ -144,6 +205,7 @@ impl<D: Database, O: ObjectStore> App<D, O> {
             ));
         }
         self.cursor_key = derive_key(secret, b"waypost-cursor-v2");
+        self.explicit_cursor_secret = Some(Sha256::digest(secret.as_bytes()).into());
         Ok(self)
     }
     pub fn with_clock(mut self, clock: Rc<dyn Clock>) -> Self {
@@ -293,6 +355,9 @@ impl<D: Database, O: ObjectStore> App<D, O> {
     }
 
     pub(crate) fn admin_auth(&self, request: &Request) -> Result<()> {
+        if !self.operator_enabled {
+            return Err(Error::unauthenticated());
+        }
         let supplied = bearer(request)?;
         if self.config.admin_secret.len() < 32 {
             return Err(Error::internal("invalid admin secret configuration"));

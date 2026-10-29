@@ -111,6 +111,7 @@ jobs:
           python3 examples/demo.py --url "$WAYPOST_URL" --output /tmp/waypost-worker-demo
           python3 scripts/verify_deployment.py --url "$WAYPOST_URL" --check-rate-limit --check-api-rate-limit
           node tests/google_jwks_worker.mjs
+          node tests/operator_retirement_worker.mjs
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
